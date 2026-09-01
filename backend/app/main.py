@@ -8,11 +8,20 @@ from dotenv import load_dotenv
 import os
 import jwt
 from datetime import datetime, timedelta, timezone
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 security = HTTPBearer()
-app = FastAPI()
 JWT_SECRET = os.getenv("JWT_SECRET")
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def verify_token(
     credentials: HTTPAuthorizationCredentials = Depends(security)
