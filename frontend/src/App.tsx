@@ -1,55 +1,47 @@
 import { useState } from "react";
 
+import Login from "./pages/Login";
+import Register from "./pages/Register";
+import Profile from "./pages/Profile";
+
+type Page = "login" | "register" | "profile";
+
 function App() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [page, setPage] = useState<Page>("login");
 
-  async function login() {
-    const response = await fetch(
-      "http://127.0.0.1:8000/auth/login",
-      {
-        method: "POST",
+  function showLogin() {
+    setPage("login");
+  }
 
-        headers: {
-          "Content-Type": "application/json",
-        },
+  function showRegister() {
+    setPage("register");
+  }
 
-        body: JSON.stringify({
-          email: email,
-          password: password,
-        }),
-      }
+  function showProfile() {
+    setPage("profile");
+  }
+
+  if (page === "login") {
+    return (
+      <Login
+        onLogin={showProfile}
+        goToRegister={showRegister}
+      />
     );
+  }
 
-    const data = await response.json();
-
-    console.log(data);
+  if (page === "register") {
+    return (
+      <Register
+        goToLogin={showLogin}
+      />
+    );
   }
 
   return (
-    <div>
-      <h1>WebIA</h1>
-
-      <h2>Connexion</h2>
-
-      <input
-        type="email"
-        placeholder="Email"
-        value={email}
-        onChange={(event) => setEmail(event.target.value)}
-      />
-
-      <input
-        type="password"
-        placeholder="Mot de passe"
-        value={password}
-        onChange={(event) => setPassword(event.target.value)}
-      />
-
-      <button onClick={login}>
-        Se connecter
-      </button>
-    </div>
+    <Profile
+      onLogout={showLogin}
+    />
   );
 }
 

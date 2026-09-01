@@ -130,9 +130,10 @@ def login(user: UserLogin):
             result = cursor.fetchone()
 
     if result is None:
-        return {
-            "message": "Email ou mot de passe incorrect"
-        }
+        raise HTTPException(
+            status_code=401,
+            detail="Email ou mot de passe incorrect"
+        )
 
     password_hash = result[0]
 
@@ -140,9 +141,10 @@ def login(user: UserLogin):
         user.password.encode("utf-8"),
         password_hash.encode("utf-8")
     ):
-        return {
-            "message": "Email ou mot de passe incorrect"
-        }
+        raise HTTPException(
+            status_code=401,
+            detail="Email ou mot de passe incorrect"
+        )
 
     token = jwt.encode(
         {
