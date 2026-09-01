@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import psycopg
 from psycopg.errors import UniqueViolation
@@ -9,10 +10,44 @@ import jwt
 from datetime import datetime, timedelta, timezone
 
 load_dotenv()
-
+security = HTTPBearer()
 app = FastAPI()
 JWT_SECRET = os.getenv("JWT_SECRET")
 
+def verify_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"]
+        )
+
+        return payload
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=401,
+            detail="Token expiré"
+        )
+
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=401,
+            detail="Token invalide"
+        )
+
+@app.get("/profile")
+def profile(payload: dict = Depends(verify_token)):
+
+    return {
+        "message": "Bienvenue sur ton profil",
+        "email": payload["email"]
+    }
 
 class UserRegister(BaseModel):
     email: str
