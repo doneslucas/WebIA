@@ -58,6 +58,13 @@ export async function login(
 
   const data = await response.json();
 
+  if (response.ok) {
+    localStorage.setItem(
+      "access_token",
+      data.access_token
+    );
+  }
+
   return {
     response,
     data,
@@ -81,6 +88,39 @@ export async function getProfile() {
       headers: {
         Authorization: `Bearer ${token}`,
       },
+    }
+  );
+
+  const data = await response.json();
+
+  return {
+    response,
+    data,
+  };
+}
+
+// =========================
+// CHATBOT
+// =========================
+
+export async function chat(question: string) {
+  const token = localStorage.getItem(
+    "access_token"
+  );
+
+  const response = await fetch(
+    `${API_URL}/chat`,
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+
+      body: JSON.stringify({
+        question,
+      }),
     }
   );
 

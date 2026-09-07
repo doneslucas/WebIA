@@ -3,11 +3,12 @@ import { useState } from "react";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Profile from "./pages/Profile";
+import Chatbot from "./pages/Chatbot";
 
-type Page = "login" | "register" | "profile";
+type Page = "login" | "register" | "profile" | "chatbot";
 
 function App() {
-  const [page, setPage] = useState<Page>("login");
+  const [page, setPage] = useState<Page>("chatbot");
 
   function showLogin() {
     setPage("login");
@@ -19,6 +20,10 @@ function App() {
 
   function showProfile() {
     setPage("profile");
+  }
+
+  function showChatbot() {
+    setPage("chatbot");
   }
 
   if (page === "login") {
@@ -38,11 +43,19 @@ function App() {
     );
   }
 
-  return (
-    <Profile
-      onLogout={showLogin}
-    />
-  );
+  if (page === "profile") {
+    return (
+      <Profile
+        onLogout={showLogin}
+      />
+    );
+  }
+
+  if (page === "chatbot") {
+    return (
+      <Chatbot />
+    );
+  }
 }
 
 export default App;
