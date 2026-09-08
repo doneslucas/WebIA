@@ -1,21 +1,25 @@
 import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { login } from "../services/api";
+import "./Login.css";
 
-type LoginProps = {
-  onLogin: () => void;
-  goToRegister: () => void;
-};
+function Login() {
+  const navigate = useNavigate();
 
-function Login({
-  onLogin,
-  goToRegister,
-}: LoginProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
 
   async function handleLogin() {
     setMessage("");
+
+    if (!email || !password) {
+      setMessage("Veuillez remplir tous les champs.");
+      return;
+    }
+
+    setLoading(true);
 
     try {
       const { response, data } = await login(
@@ -35,56 +39,114 @@ function Login({
         data.access_token
       );
 
-      onLogin();
+      navigate("/profile");
     } catch {
       setMessage(
         "Impossible de contacter le serveur"
       );
+    } finally {
+      setLoading(false);
     }
   }
 
   return (
-    <div>
-      <h1>WebIA</h1>
+    <div className="auth-page">
+      <div className="auth-container">
 
-      <h2>Connexion</h2>
+        <div className="auth-brand">
+          <div className="auth-logo">
+            🛡️
+          </div>
 
-      <input
-        type="email"
-        placeholder="Email"
-        value={email}
-        onChange={(event) =>
-          setEmail(event.target.value)
-        }
-      />
+          <h1>WebIA</h1>
 
-      <br />
-      <br />
+          <p>
+            Assistant intelligent en cybersécurité
+          </p>
+        </div>
 
-      <input
-        type="password"
-        placeholder="Mot de passe"
-        value={password}
-        onChange={(event) =>
-          setPassword(event.target.value)
-        }
-      />
+        <div className="auth-card">
+          <h2>Bienvenue</h2>
 
-      <br />
-      <br />
+          <p className="auth-description">
+            Connectez-vous à votre espace WebIA.
+          </p>
 
-      <button onClick={handleLogin}>
-        Se connecter
-      </button>
+          <div className="auth-form">
+            <div className="form-group">
+              <label htmlFor="email">
+                Adresse email
+              </label>
 
-      <br />
-      <br />
+              <input
+                id="email"
+                type="email"
+                placeholder="exemple@email.com"
+                value={email}
+                onChange={(event) =>
+                  setEmail(event.target.value)
+                }
+              />
+            </div>
 
-      <button onClick={goToRegister}>
-        Créer un compte
-      </button>
+            <div className="form-group">
+              <label htmlFor="password">
+                Mot de passe
+              </label>
 
-      {message && <p>{message}</p>}
+              <input
+                id="password"
+                type="password"
+                placeholder="Votre mot de passe"
+                value={password}
+                onChange={(event) =>
+                  setPassword(event.target.value)
+                }
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    handleLogin();
+                  }
+                }}
+              />
+            </div>
+
+            <button
+              className="auth-button"
+              onClick={handleLogin}
+              disabled={loading}
+            >
+              {loading
+                ? "Connexion..."
+                : "Se connecter"}
+            </button>
+          </div>
+
+          {message && (
+            <p className="auth-message">
+              {message}
+            </p>
+          )}
+
+          <div className="auth-separator">
+            <span>OU</span>
+          </div>
+
+          <div className="auth-footer">
+            <span>
+              Vous n'avez pas encore de compte ?
+            </span>
+
+            <Link to="/register">
+              Créer un compte
+            </Link>
+          </div>
+        </div>
+
+        <p className="auth-security">
+          🔒 Vos données sont protégées
+        </p>
+
+      </div>
     </div>
   );
 }

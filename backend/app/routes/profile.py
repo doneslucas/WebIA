@@ -9,9 +9,10 @@ router = APIRouter(
 
 
 @router.get("/profile")
-def profile(payload: dict = Depends(verify_token)):
-
+def get_profile(
+    payload: dict = Depends(verify_token)
+):
     return {
-        "message": "Bienvenue sur ton profil",
-        "email": payload["email"]
+        "email": payload.get("email"),
+        "role": payload.get("role")
     }

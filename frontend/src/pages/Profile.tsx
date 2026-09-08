@@ -1,19 +1,32 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { getProfile } from "../services/api";
+import Navbar from "../components/Navbar";
+import DocumentUpload from "./DocumentUpload";
+import "./Profile.css";
 
-type ProfileProps = {
-  onLogout: () => void;
-};
+function Profile() {
+  const navigate = useNavigate();
 
-function Profile({ onLogout }: ProfileProps) {
   const [email, setEmail] = useState("");
+  const [role, setRole] = useState("");
   const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
 
   async function loadProfile() {
+    setMessage("");
+    setLoading(true);
+
     try {
       const { response, data } = await getProfile();
 
       if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem("access_token");
+          navigate("/login");
+          return;
+        }
+
         setMessage(
           data.detail ||
             "Erreur lors de la récupération du profil"
@@ -22,14 +35,17 @@ function Profile({ onLogout }: ProfileProps) {
       }
 
       setEmail(data.email);
+      setRole(data.role);
     } catch {
       setMessage("Impossible de contacter le serveur");
+    } finally {
+      setLoading(false);
     }
   }
 
   function logout() {
     localStorage.removeItem("access_token");
-    onLogout();
+    navigate("/login");
   }
 
   useEffect(() => {
@@ -37,30 +53,75 @@ function Profile({ onLogout }: ProfileProps) {
   }, []);
 
   return (
-    <div>
-      <h1>WebIA</h1>
+    <div className="profile-page">
+      <Navbar />
 
-      <h2>Mon profil</h2>
+      <main className="profile-container">
+        <div className="profile-header">
+          <h1>Mon profil</h1>
 
-      <p>Vous êtes connecté avec :</p>
+          <p>
+            Gérez les informations de votre compte.
+          </p>
+        </div>
 
-      <strong>{email}</strong>
+        <div className="profile-card">
+          <div className="profile-avatar">
+            👤
+          </div>
 
-      <br />
-      <br />
+          <div className="profile-info">
+            <span className="profile-label">
+              Adresse email
+            </span>
 
-      <button onClick={loadProfile}>
-        Actualiser le profil
-      </button>
+            <strong className="profile-email">
+              {email || "Chargement..."}
+            </strong>
 
-      <br />
-      <br />
+            <span className="profile-label">
+              Rôle
+            </span>
 
-      <button onClick={logout}>
-        Se déconnecter
-      </button>
+            <strong className="profile-email">
+              {role === "admin"
+                ? "Administrateur"
+                : role === "user"
+                ? "Utilisateur"
+                : "Chargement..."}
+            </strong>
+          </div>
+        </div>
 
-      {message && <p>{message}</p>}
+        {message && (
+          <p className="profile-message">
+            {message}
+          </p>
+        )}
+
+        <div className="profile-actions">
+          <button
+            className="profile-refresh-button"
+            onClick={loadProfile}
+            disabled={loading}
+          >
+            {loading
+              ? "Actualisation..."
+              : "Actualiser le profil"}
+          </button>
+
+          {role === "admin" && (
+            <DocumentUpload />
+          )}
+
+          <button
+            className="profile-logout-button"
+            onClick={logout}
+          >
+            Se déconnecter
+          </button>
+        </div>
+      </main>
     </div>
   );
 }

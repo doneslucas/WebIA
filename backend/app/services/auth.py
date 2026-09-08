@@ -7,7 +7,6 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
 security = HTTPBearer()
@@ -31,9 +30,10 @@ def verify_password(password: str, password_hash: str) -> bool:
     )
 
 
-def create_access_token(email: str) -> str:
+def create_access_token(email: str, role: str) -> str:
     payload = {
         "email": email,
+        "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(hours=1)
     }
 

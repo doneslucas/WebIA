@@ -1,61 +1,58 @@
-import { useState } from "react";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Profile from "./pages/Profile";
 import Chatbot from "./pages/Chatbot";
 
-type Page = "login" | "register" | "profile" | "chatbot";
-
 function App() {
-  const [page, setPage] = useState<Page>("chatbot");
+  const token = localStorage.getItem("access_token");
 
-  function showLogin() {
-    setPage("login");
-  }
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <Navigate
+              to={token ? "/chatbot" : "/login"}
+              replace
+            />
+          }
+        />
 
-  function showRegister() {
-    setPage("register");
-  }
+        <Route
+          path="/login"
+          element={<Login />}
+        />
 
-  function showProfile() {
-    setPage("profile");
-  }
+        <Route
+          path="/register"
+          element={<Register />}
+        />
 
-  function showChatbot() {
-    setPage("chatbot");
-  }
+        <Route
+          path="/profile"
+          element={<Profile />}
+        />
 
-  if (page === "login") {
-    return (
-      <Login
-        onLogin={showProfile}
-        goToRegister={showRegister}
-      />
-    );
-  }
+        <Route
+          path="/chatbot"
+          element={<Chatbot />}
+        />
 
-  if (page === "register") {
-    return (
-      <Register
-        goToLogin={showLogin}
-      />
-    );
-  }
-
-  if (page === "profile") {
-    return (
-      <Profile
-        onLogout={showLogin}
-      />
-    );
-  }
-
-  if (page === "chatbot") {
-    return (
-      <Chatbot />
-    );
-  }
+        <Route
+          path="*"
+          element={
+            <Navigate
+              to={token ? "/chatbot" : "/login"}
+              replace
+            />
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  );
 }
 
 export default App;

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { chat } from "../services/api";
+import Navbar from "../components/Navbar";
 import "./Chatbot.css";
 
 type Source = {
@@ -17,6 +18,7 @@ function Chatbot() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
+  const [openSources, setOpenSources] = useState<number[]>([]);
 
   async function sendMessage() {
     if (!question.trim() || loading) {
@@ -67,10 +69,23 @@ function Chatbot() {
     }
   }
 
+  function toggleSources(index: number) {
+    setOpenSources((previous) => {
+      if (previous.includes(index)) {
+        return previous.filter(
+          (sourceIndex) => sourceIndex !== index
+        );
+      }
+
+      return [...previous, index];
+    });
+  }
+
   return (
     <div className="chatbot-page">
-      <div className="chatbot-container">
+      <Navbar />
 
+      <div className="chatbot-container">
         <header className="chatbot-header">
           <div>
             <h1>Assistant Cyber</h1>
@@ -79,10 +94,10 @@ function Chatbot() {
         </header>
 
         <main className="chatbot-messages">
-
           {messages.length === 0 && (
             <div className="chatbot-welcome">
               <h2>Bonjour 👋</h2>
+
               <p>
                 Pose une question concernant les documents de
                 cybersécurité disponibles dans la base.
@@ -108,25 +123,41 @@ function Chatbot() {
 
                 <p>{message.content}</p>
 
-                {message.sources &&
+                {message.role === "assistant" &&
+                  message.sources &&
                   message.sources.length > 0 && (
-                    <div className="sources">
-                      <div className="sources-title">
-                        Sources
-                      </div>
+                    <div className="sources-container">
+                      <button
+                        type="button"
+                        className="sources-button"
+                        onClick={() => toggleSources(index)}
+                      >
+                        📚 Sources{" "}
+                        {openSources.includes(index)
+                          ? "▲"
+                          : "▼"}
+                      </button>
 
-                      {message.sources.map(
-                        (source, sourceIndex) => (
-                          <div
-                            key={sourceIndex}
-                            className="source"
-                          >
-                            📄 {source.file} — page{" "}
-                            {source.page !== null
-                              ? source.page + 1
-                              : "inconnue"}
-                          </div>
-                        )
+                      {openSources.includes(index) && (
+                        <div className="sources">
+                          {message.sources.map(
+                            (source, sourceIndex) => (
+                              <div
+                                key={sourceIndex}
+                                className="source"
+                              >
+                                📄{" "}
+                                {source.file
+                                  .split(/[\\/]/)
+                                  .pop()}{" "}
+                                — page{" "}
+                                {source.page !== null
+                                  ? source.page + 1
+                                  : "inconnue"}
+                              </div>
+                            )
+                          )}
+                        </div>
                       )}
                     </div>
                   )}
@@ -174,7 +205,6 @@ function Chatbot() {
             Envoyer
           </button>
         </div>
-
       </div>
     </div>
   );

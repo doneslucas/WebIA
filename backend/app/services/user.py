@@ -10,13 +10,11 @@ from app.services.auth import (
 
 
 def register_user(email: str, password: str):
-
     password_hash = hash_password(password)
 
     try:
         with get_connection() as conn:
             with conn.cursor() as cursor:
-
                 cursor.execute(
                     """
                     INSERT INTO users (email, password_hash)
@@ -39,13 +37,11 @@ def register_user(email: str, password: str):
 
 
 def login_user(email: str, password: str):
-
     with get_connection() as conn:
         with conn.cursor() as cursor:
-
             cursor.execute(
                 """
-                SELECT password_hash
+                SELECT password_hash, role
                 FROM users
                 WHERE email = %s
                 """,
@@ -61,6 +57,7 @@ def login_user(email: str, password: str):
         )
 
     password_hash = result[0]
+    role = result[1]
 
     if not verify_password(password, password_hash):
         raise HTTPException(
@@ -68,7 +65,10 @@ def login_user(email: str, password: str):
             detail="Email ou mot de passe incorrect"
         )
 
-    token = create_access_token(email)
+    token = create_access_token(
+        email=email,
+        role=role
+    )
 
     return {
         "message": "Connexion réussie",
