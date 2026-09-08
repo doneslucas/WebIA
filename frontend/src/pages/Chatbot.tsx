@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { chat } from "../services/api";
+import "./Chatbot.css";
 
 type Source = {
   file: string;
@@ -67,56 +68,113 @@ function Chatbot() {
   }
 
   return (
-    <div>
-      <h1>Assistant Cyber</h1>
+    <div className="chatbot-page">
+      <div className="chatbot-container">
 
-      <div>
-        {messages.map((message, index) => (
-          <div key={index}>
-            <strong>
-              {message.role === "user" ? "Vous" : "Assistant"}
-            </strong>
-
-            <p>{message.content}</p>
-
-            {message.sources && message.sources.length > 0 && (
-              <div>
-                <strong>Sources :</strong>
-
-                <ul>
-                  {message.sources.map((source, sourceIndex) => (
-                    <li key={sourceIndex}>
-                      {source.file} — page{" "}
-                      {source.page !== null
-                        ? source.page + 1
-                        : "inconnue"}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+        <header className="chatbot-header">
+          <div>
+            <h1>Assistant Cyber</h1>
+            <p>Assistant spécialisé en cybersécurité</p>
           </div>
-        ))}
-      </div>
+        </header>
 
-      {loading && <p>Assistant en train de réfléchir...</p>}
+        <main className="chatbot-messages">
 
-      <div>
-        <input
-          type="text"
-          value={question}
-          onChange={(event) => setQuestion(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              sendMessage();
+          {messages.length === 0 && (
+            <div className="chatbot-welcome">
+              <h2>Bonjour 👋</h2>
+              <p>
+                Pose une question concernant les documents de
+                cybersécurité disponibles dans la base.
+              </p>
+            </div>
+          )}
+
+          {messages.map((message, index) => (
+            <div
+              key={index}
+              className={`message ${
+                message.role === "user"
+                  ? "message-user"
+                  : "message-assistant"
+              }`}
+            >
+              <div className="message-content">
+                <div className="message-role">
+                  {message.role === "user"
+                    ? "Vous"
+                    : "Assistant"}
+                </div>
+
+                <p>{message.content}</p>
+
+                {message.sources &&
+                  message.sources.length > 0 && (
+                    <div className="sources">
+                      <div className="sources-title">
+                        Sources
+                      </div>
+
+                      {message.sources.map(
+                        (source, sourceIndex) => (
+                          <div
+                            key={sourceIndex}
+                            className="source"
+                          >
+                            📄 {source.file} — page{" "}
+                            {source.page !== null
+                              ? source.page + 1
+                              : "inconnue"}
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
+              </div>
+            </div>
+          ))}
+
+          {loading && (
+            <div className="message message-assistant">
+              <div className="message-content">
+                <div className="message-role">
+                  Assistant
+                </div>
+
+                <div className="loading">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </div>
+              </div>
+            </div>
+          )}
+        </main>
+
+        <div className="chatbot-input-container">
+          <input
+            type="text"
+            value={question}
+            onChange={(event) =>
+              setQuestion(event.target.value)
             }
-          }}
-          placeholder="Posez votre question..."
-        />
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                sendMessage();
+              }
+            }}
+            placeholder="Posez votre question..."
+            disabled={loading}
+          />
 
-        <button onClick={sendMessage} disabled={loading}>
-          Envoyer
-        </button>
+          <button
+            onClick={sendMessage}
+            disabled={loading || !question.trim()}
+          >
+            Envoyer
+          </button>
+        </div>
+
       </div>
     </div>
   );

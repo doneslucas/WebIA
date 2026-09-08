@@ -31,7 +31,7 @@ def ask_rag(question: str):
 
     results = search_chunks(
         query_vector,
-        n_results=3
+        n_results=5
     )
 
 
@@ -57,26 +57,27 @@ def ask_rag(question: str):
     prompt = f"""
 Tu es un assistant spécialisé en cybersécurité.
 
-Réponds uniquement à partir du contexte fourni.
+Tu dois répondre UNIQUEMENT avec les informations présentes dans le CONTEXTE.
 
-Consignes :
-- Réponds en français.
-- Sois précis et concis.
-- Réponds directement à la question.
-- Donne uniquement les informations nécessaires.
-- Ne fais pas d'introduction inutile.
+RÈGLES STRICTES :
+- Réponds uniquement en français.
+- N'utilise aucune connaissance extérieure au contexte.
+- N'invente aucune information.
+- Si la réponse à la question n'est pas clairement présente dans le contexte,
+  réponds exactement :
+  "Je ne trouve pas cette information dans les documents disponibles."
+- Ne complète pas les informations manquantes avec tes connaissances générales.
+- Réponds de manière concise mais complète.
 - Ne répète pas les informations.
-- Termine toujours ton explication avant la fin de ta réponse.
-- N'invente aucune information absente du contexte.
-- Si le contexte ne permet pas de répondre, dis-le clairement.
+- Termine toujours ta réponse correctement.
 
-Contexte :
+CONTEXTE :
 {context}
 
-Question :
+QUESTION :
 {question}
 
-Réponse :
+RÉPONSE :
 """
 
 
