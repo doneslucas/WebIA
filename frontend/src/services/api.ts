@@ -156,3 +156,34 @@ export async function getProgress() {
     data,
   };
 }
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string
+) {
+  const token = localStorage.getItem(
+    "access_token"
+  );
+
+  const response = await fetch(
+    `${API_URL}/profile/password`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    }
+  );
+
+  const data = await response.json();
+
+  return {
+    response,
+    data,
+  };
+}

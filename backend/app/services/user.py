@@ -76,3 +76,61 @@ def login_user(email: str, password: str):
         "message": "Connexion réussie",
         "access_token": token
     }
+
+
+def change_password(
+    user_id: int,
+    current_password: str,
+    new_password: str
+):
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT password_hash
+                FROM users
+                WHERE id = %s
+                """,
+                (user_id,)
+            )
+
+            result = cursor.fetchone()
+
+            if result is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Utilisateur introuvable"
+                )
+
+            current_password_hash = result[0]
+
+            if not verify_password(
+                current_password,
+                current_password_hash
+            ):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Ancien mot de passe incorrect"
+                )
+
+            new_password_hash = hash_password(
+                new_password
+            )
+
+            cursor.execute(
+                """
+                UPDATE users
+                SET password_hash = %s
+                WHERE id = %s
+                """,
+                (
+                    new_password_hash,
+                    user_id
+                )
+            )
+
+            conn.commit()
+
+    return {
+        "message": "Mot de passe modifié avec succès"
+    }
