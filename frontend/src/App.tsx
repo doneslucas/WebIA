@@ -1,24 +1,29 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Routes, Route, useLocation } from "react-router-dom";
 
+import Navbar from "./components/Navbar";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Profile from "./pages/Profile";
 import Chatbot from "./pages/Chatbot";
+import DocumentUpload from "./pages/DocumentUpload";
+import Progression from "./pages/Progression";
 
-function App() {
-  const token = localStorage.getItem("access_token");
+
+function AppContent() {
+  const location = useLocation();
+
+  const hideNavbar =
+    location.pathname === "/login" ||
+    location.pathname === "/register";
 
   return (
-    <BrowserRouter>
+    <>
+      {!hideNavbar && <Navbar />}
+
       <Routes>
         <Route
           path="/"
-          element={
-            <Navigate
-              to={token ? "/chatbot" : "/login"}
-              replace
-            />
-          }
+          element={<Chatbot />}
         />
 
         <Route
@@ -37,22 +42,37 @@ function App() {
         />
 
         <Route
+          path="/chat"
+          element={<Chatbot />}
+        />
+
+        <Route
           path="/chatbot"
           element={<Chatbot />}
         />
 
         <Route
-          path="*"
-          element={
-            <Navigate
-              to={token ? "/chatbot" : "/login"}
-              replace
-            />
-          }
+          path="/documents"
+          element={<DocumentUpload />}
+        />
+
+        <Route
+          path="/progression"
+          element={<Progression />}
         />
       </Routes>
+    </>
+  );
+}
+
+
+function App() {
+  return (
+    <BrowserRouter>
+      <AppContent />
     </BrowserRouter>
   );
 }
+
 
 export default App;

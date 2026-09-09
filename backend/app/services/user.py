@@ -41,7 +41,7 @@ def login_user(email: str, password: str):
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT password_hash, role
+                SELECT id, password_hash, role
                 FROM users
                 WHERE email = %s
                 """,
@@ -56,8 +56,9 @@ def login_user(email: str, password: str):
             detail="Email ou mot de passe incorrect"
         )
 
-    password_hash = result[0]
-    role = result[1]
+    user_id = result[0]
+    password_hash = result[1]
+    role = result[2]
 
     if not verify_password(password, password_hash):
         raise HTTPException(
@@ -66,6 +67,7 @@ def login_user(email: str, password: str):
         )
 
     token = create_access_token(
+        user_id=user_id,
         email=email,
         role=role
     )

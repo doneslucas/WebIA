@@ -1,17 +1,23 @@
 .profile-page {
-  min-height: 100vh;
+  min-height: calc(100vh - 64px);
+  box-sizing: border-box;
   background: #f3f4f6;
+  overflow: hidden;
 }
+
 
 .profile-container {
   max-width: 900px;
   margin: 0 auto;
   padding: 50px 30px;
+  box-sizing: border-box;
 }
+
 
 .profile-header {
   margin-bottom: 30px;
 }
+
 
 .profile-header h1 {
   margin: 0;
@@ -19,11 +25,13 @@
   color: #111827;
 }
 
+
 .profile-header p {
   margin-top: 8px;
   color: #6b7280;
   font-size: 16px;
 }
+
 
 .profile-card {
   display: flex;
@@ -34,7 +42,9 @@
   padding: 30px;
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
   margin-bottom: 25px;
+  box-sizing: border-box;
 }
+
 
 .profile-avatar {
   width: 70px;
@@ -45,7 +55,9 @@
   background: #e5e7eb;
   border-radius: 50%;
   font-size: 32px;
+  flex-shrink: 0;
 }
+
 
 .profile-info {
   display: flex;
@@ -53,15 +65,18 @@
   gap: 8px;
 }
 
+
 .profile-label {
   font-size: 14px;
   color: #6b7280;
 }
 
+
 .profile-email {
   font-size: 18px;
   color: #111827;
 }
+
 
 .profile-message {
   padding: 12px 16px;
@@ -71,11 +86,13 @@
   margin-bottom: 20px;
 }
 
+
 .profile-actions {
   display: flex;
   flex-direction: column;
   gap: 15px;
 }
+
 
 .profile-actions button {
   border: none;
@@ -86,10 +103,12 @@
   transition: 0.2s;
 }
 
+
 .profile-actions button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
+
 
 .profile-refresh-button {
   align-self: flex-start;
@@ -97,20 +116,28 @@
   color: #111827;
 }
 
+
 .profile-refresh-button:hover:not(:disabled) {
   background: #d1d5db;
 }
+
 
 .profile-logout-button {
   background: #dc2626;
   color: white;
 }
 
+
 .profile-logout-button:hover {
   background: #b91c1c;
 }
 
+
 @media (max-width: 600px) {
+  .profile-page {
+    overflow: auto;
+  }
+
   .profile-container {
     padding: 30px 20px;
   }

@@ -30,8 +30,13 @@ def verify_password(password: str, password_hash: str) -> bool:
     )
 
 
-def create_access_token(email: str, role: str) -> str:
+def create_access_token(
+    user_id: int,
+    email: str,
+    role: str
+) -> str:
     payload = {
+        "user_id": user_id,
         "email": email,
         "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(hours=1)

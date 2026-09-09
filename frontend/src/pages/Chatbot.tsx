@@ -1,12 +1,15 @@
 import { useState } from "react";
+
 import { chat } from "../services/api";
-import Navbar from "../components/Navbar";
+
 import "./Chatbot.css";
+
 
 type Source = {
   file: string;
   page: number | null;
 };
+
 
 type Message = {
   role: "user" | "assistant";
@@ -14,11 +17,13 @@ type Message = {
   sources?: Source[];
 };
 
+
 function Chatbot() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [openSources, setOpenSources] = useState<number[]>([]);
+
 
   async function sendMessage() {
     if (!question.trim() || loading) {
@@ -53,6 +58,7 @@ function Chatbot() {
           sources: result.data.sources,
         },
       ]);
+
     } catch (error) {
       console.error(error);
 
@@ -64,10 +70,12 @@ function Chatbot() {
             "Une erreur est survenue lors de la communication avec le serveur.",
         },
       ]);
+
     } finally {
       setLoading(false);
     }
   }
+
 
   function toggleSources(index: number) {
     setOpenSources((previous) => {
@@ -81,31 +89,41 @@ function Chatbot() {
     });
   }
 
+
   return (
     <div className="chatbot-page">
-      <Navbar />
 
       <div className="chatbot-container">
+
         <header className="chatbot-header">
           <div>
             <h1>Assistant Cyber</h1>
-            <p>Assistant spécialisé en cybersécurité</p>
+
+            <p>
+              Assistant spécialisé en cybersécurité
+            </p>
           </div>
         </header>
 
+
         <main className="chatbot-messages">
+
           {messages.length === 0 && (
             <div className="chatbot-welcome">
+
               <h2>Bonjour 👋</h2>
 
               <p>
                 Pose une question concernant les documents de
                 cybersécurité disponibles dans la base.
               </p>
+
             </div>
           )}
 
+
           {messages.map((message, index) => (
+
             <div
               key={index}
               className={`message ${
@@ -114,19 +132,25 @@ function Chatbot() {
                   : "message-assistant"
               }`}
             >
+
               <div className="message-content">
+
                 <div className="message-role">
                   {message.role === "user"
                     ? "Vous"
                     : "Assistant"}
                 </div>
 
+
                 <p>{message.content}</p>
+
 
                 {message.role === "assistant" &&
                   message.sources &&
                   message.sources.length > 0 && (
+
                     <div className="sources-container">
+
                       <button
                         type="button"
                         className="sources-button"
@@ -138,10 +162,14 @@ function Chatbot() {
                           : "▼"}
                       </button>
 
+
                       {openSources.includes(index) && (
+
                         <div className="sources">
+
                           {message.sources.map(
                             (source, sourceIndex) => (
+
                               <div
                                 key={sourceIndex}
                                 className="source"
@@ -155,19 +183,29 @@ function Chatbot() {
                                   ? source.page + 1
                                   : "inconnue"}
                               </div>
+
                             )
                           )}
+
                         </div>
                       )}
+
                     </div>
                   )}
+
               </div>
+
             </div>
+
           ))}
 
+
           {loading && (
+
             <div className="message message-assistant">
+
               <div className="message-content">
+
                 <div className="message-role">
                   Assistant
                 </div>
@@ -177,12 +215,18 @@ function Chatbot() {
                   <span></span>
                   <span></span>
                 </div>
+
               </div>
+
             </div>
+
           )}
+
         </main>
 
+
         <div className="chatbot-input-container">
+
           <input
             type="text"
             value={question}
@@ -198,16 +242,21 @@ function Chatbot() {
             disabled={loading}
           />
 
+
           <button
             onClick={sendMessage}
             disabled={loading || !question.trim()}
           >
             Envoyer
           </button>
+
         </div>
+
       </div>
+
     </div>
   );
 }
+
 
 export default Chatbot;

@@ -26,6 +26,10 @@ function Navbar() {
           Profil
         </Link>
 
+        <Link to="/progression">
+          Progression
+        </Link>
+
         <button onClick={handleLogout}>
           Déconnexion
         </button>
