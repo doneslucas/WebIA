@@ -2,6 +2,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 
 from app.services.user import register_user, login_user
+from app.services.auth import (
+    verify_refresh_token,
+    create_access_token
+)
 
 
 router = APIRouter(
@@ -18,6 +22,10 @@ class UserRegister(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 
 def validate_password(password: str):
@@ -68,3 +76,30 @@ def login(user: UserLogin):
         str(user.email).lower(),
         user.password
     )
+
+
+@router.post("/refresh")
+def refresh_token(request: RefreshTokenRequest):
+    payload = verify_refresh_token(
+        request.refresh_token
+    )
+
+    user_id = payload.get("user_id")
+    email = payload.get("email")
+    role = payload.get("role")
+
+    if user_id is None or email is None or role is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token invalide."
+        )
+
+    access_token = create_access_token(
+        user_id=user_id,
+        email=email,
+        role=role
+    )
+
+    return {
+        "access_token": access_token
+    }

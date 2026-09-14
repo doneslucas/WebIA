@@ -1,67 +1,137 @@
 const API_URL = "http://127.0.0.1:8000";
 
 
-export async function register(email: string, password: string) {
-  const response = await fetch(`${API_URL}/auth/register`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      email,
-      password,
-    }),
-  });
+async function refreshAccessToken(): Promise<string | null> {
+  const refreshToken = localStorage.getItem(
+    "refresh_token"
+  );
 
-  const data = await response.json();
+  if (!refreshToken) {
+    return null;
+  }
 
-  return {
-    response,
-    data,
-  };
-}
+  try {
+    const response = await fetch(
+      `${API_URL}/auth/refresh`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          refresh_token: refreshToken,
+        }),
+      }
+    );
 
+    if (!response.ok) {
+      localStorage.removeItem("access_token");
+      localStorage.removeItem("refresh_token");
 
-export async function login(email: string, password: string) {
-  const response = await fetch(`${API_URL}/auth/login`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      email,
-      password,
-    }),
-  });
+      return null;
+    }
 
-  const data = await response.json();
+    const data = await response.json();
 
-  if (response.ok) {
+    if (!data.access_token) {
+      localStorage.removeItem("access_token");
+      localStorage.removeItem("refresh_token");
+
+      return null;
+    }
+
     localStorage.setItem(
       "access_token",
       data.access_token
     );
-  }
 
-  return {
-    response,
-    data,
-  };
+    return data.access_token;
+
+  } catch (error) {
+    console.error(
+      "Erreur lors du renouvellement du token :",
+      error
+    );
+
+    return null;
+  }
 }
 
 
-export async function getProfile() {
+async function authenticatedFetch(
+  url: string,
+  options: RequestInit = {},
+  retry = true
+): Promise<Response> {
+
   const token = localStorage.getItem(
     "access_token"
   );
 
+  const headers = new Headers(
+    options.headers
+  );
+
+  if (token) {
+    headers.set(
+      "Authorization",
+      `Bearer ${token}`
+    );
+  }
+
   const response = await fetch(
-    `${API_URL}/profile`,
+    url,
     {
-      method: "GET",
+      ...options,
+      headers,
+    }
+  );
+
+  if (response.status !== 401 || !retry) {
+    return response;
+  }
+
+  const newToken =
+    await refreshAccessToken();
+
+  if (!newToken) {
+    return response;
+  }
+
+  const retryHeaders = new Headers(
+    options.headers
+  );
+
+  retryHeaders.set(
+    "Authorization",
+    `Bearer ${newToken}`
+  );
+
+  return fetch(
+    url,
+    {
+      ...options,
+      headers: retryHeaders,
+    }
+  );
+}
+
+
+export async function register(
+  email: string,
+  password: string
+) {
+  const response = await fetch(
+    `${API_URL}/auth/register`,
+    {
+      method: "POST",
       headers: {
-        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify({
+        email,
+        password,
+      }),
     }
   );
 
@@ -74,18 +144,71 @@ export async function getProfile() {
 }
 
 
-export async function chat(question: string) {
-  const token = localStorage.getItem(
-    "access_token"
+export async function login(
+  email: string,
+  password: string
+) {
+  const response = await fetch(
+    `${API_URL}/auth/login`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email,
+        password,
+      }),
+    }
   );
 
-  const response = await fetch(
+  const data = await response.json();
+
+  if (response.ok) {
+    localStorage.setItem(
+      "access_token",
+      data.access_token
+    );
+
+    localStorage.setItem(
+      "refresh_token",
+      data.refresh_token
+    );
+  }
+
+  return {
+    response,
+    data,
+  };
+}
+
+
+export async function getProfile() {
+  const response = await authenticatedFetch(
+    `${API_URL}/profile`,
+    {
+      method: "GET",
+    }
+  );
+
+  const data = await response.json();
+
+  return {
+    response,
+    data,
+  };
+}
+
+
+export async function chat(
+  question: string
+) {
+  const response = await authenticatedFetch(
     `${API_URL}/chat`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
         question,
@@ -102,11 +225,9 @@ export async function chat(question: string) {
 }
 
 
-export async function uploadDocument(file: File) {
-  const token = localStorage.getItem(
-    "access_token"
-  );
-
+export async function uploadDocument(
+  file: File
+) {
   const formData = new FormData();
 
   formData.append(
@@ -114,13 +235,10 @@ export async function uploadDocument(file: File) {
     file
   );
 
-  const response = await fetch(
+  const response = await authenticatedFetch(
     `${API_URL}/documents/upload`,
     {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
       body: formData,
     }
   );
@@ -135,17 +253,10 @@ export async function uploadDocument(file: File) {
 
 
 export async function getProgress() {
-  const token = localStorage.getItem(
-    "access_token"
-  );
-
-  const response = await fetch(
+  const response = await authenticatedFetch(
     `${API_URL}/progress`,
     {
       method: "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
     }
   );
 
@@ -157,25 +268,50 @@ export async function getProgress() {
   };
 }
 
+
 export async function changePassword(
   currentPassword: string,
   newPassword: string
 ) {
-  const token = localStorage.getItem(
-    "access_token"
-  );
-
-  const response = await fetch(
+  const response = await authenticatedFetch(
     `${API_URL}/profile/password`,
     {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
         current_password: currentPassword,
         new_password: newPassword,
+      }),
+    }
+  );
+
+  const data = await response.json();
+
+  return {
+    response,
+    data,
+  };
+}
+
+
+export async function generateQuiz(
+  document: string,
+  questionCount: number,
+  difficulty: string
+) {
+  const response = await authenticatedFetch(
+    `${API_URL}/quiz/generate`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        document,
+        question_count: questionCount,
+        difficulty,
       }),
     }
   );

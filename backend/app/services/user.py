@@ -5,7 +5,8 @@ from app.database.connection import get_connection
 from app.services.auth import (
     hash_password,
     verify_password,
-    create_access_token
+    create_access_token,
+    create_refresh_token
 )
 
 
@@ -66,7 +67,13 @@ def login_user(email: str, password: str):
             detail="Email ou mot de passe incorrect"
         )
 
-    token = create_access_token(
+    access_token = create_access_token(
+        user_id=user_id,
+        email=email,
+        role=role
+    )
+
+    refresh_token = create_refresh_token(
         user_id=user_id,
         email=email,
         role=role
@@ -74,7 +81,8 @@ def login_user(email: str, password: str):
 
     return {
         "message": "Connexion réussie",
-        "access_token": token
+        "access_token": access_token,
+        "refresh_token": refresh_token
     }
 
 

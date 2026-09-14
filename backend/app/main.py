@@ -6,7 +6,7 @@ from app.routes.profile import router as profile_router
 from app.routes.chat import router as chat_router
 from app.routes.documents import router as documents_router
 from app.routes.progress import router as progress_router
-
+from app.routes.quiz import router as quiz_router
 
 app = FastAPI(
     title="WebIA",
@@ -29,7 +29,7 @@ app.include_router(profile_router)
 app.include_router(chat_router)
 app.include_router(documents_router)
 app.include_router(progress_router)
-
+app.include_router(quiz_router)
 
 @app.get("/")
 def root():
