@@ -28,6 +28,10 @@ function Quiz() {
     loading,
     message,
 
+    currentAnswerCorrect,
+    currentCorrectAnswer,
+    currentExplanation,
+
     setDocument,
     setQuestionCount,
     setDifficulty,
@@ -37,7 +41,6 @@ function Quiz() {
     selectAnswer,
     showQuestionCorrection,
     nextQuestion,
-    previousQuestion,
 
     returnToQuizHome,
 
@@ -273,15 +276,15 @@ function Quiz() {
                     Tous les documents
                   </option>
 
-                  <option value="cybermenaces">
+                  <option value="Cybermenaces.pdf">
                     Cybermenaces.pdf
                   </option>
 
-                  <option value="phishing">
+                  <option value="Le_Phishing.pdf">
                     Le_Phishing.pdf
                   </option>
 
-                  <option value="test">
+                  <option value="test.pdf">
                     test.pdf
                   </option>
 
@@ -519,11 +522,6 @@ function Quiz() {
     answers[currentQuestion];
 
 
-  const isCorrect =
-    selectedAnswer ===
-    current.correct_answer;
-
-
   return (
     <div className="quiz-page">
 
@@ -621,34 +619,39 @@ function Quiz() {
             <div className="quiz-correction">
 
               <h3>
-                {isCorrect
+                {currentAnswerCorrect
                   ? "🟢 Bonne réponse !"
                   : "🔴 Mauvaise réponse"}
               </h3>
 
 
-              {!isCorrect && (
+              {!currentAnswerCorrect &&
+                currentCorrectAnswer !== null && (
+
+                  <p>
+
+                    <strong>
+                      La bonne réponse était :
+                    </strong>{" "}
+
+                    {
+                      current.options[
+                        currentCorrectAnswer
+                      ]
+                    }
+
+                  </p>
+
+                )}
+
+
+              {currentExplanation && (
 
                 <p>
-
-                  <strong>
-                    La bonne réponse était :
-                  </strong>{" "}
-
-                  {
-                    current.options[
-                      current.correct_answer
-                    ]
-                  }
-
+                  {currentExplanation}
                 </p>
 
               )}
-
-
-              <p>
-                {current.explanation}
-              </p>
 
             </div>
 
@@ -666,24 +669,6 @@ function Quiz() {
 
           <div className="quiz-navigation">
 
-            {!showCorrection && (
-
-              <button
-                type="button"
-                className="quiz-secondary-button"
-                onClick={
-                  previousQuestion
-                }
-                disabled={
-                  currentQuestion === 0
-                }
-              >
-                Précédent
-              </button>
-
-            )}
-
-
             {!showCorrection ? (
 
               <button
@@ -692,8 +677,11 @@ function Quiz() {
                 onClick={
                   showQuestionCorrection
                 }
+                disabled={loading}
               >
-                Vérifier ma réponse
+                {loading
+                  ? "Vérification..."
+                  : "Vérifier ma réponse"}
               </button>
 
             ) : (
@@ -704,12 +692,15 @@ function Quiz() {
                 onClick={
                   nextQuestion
                 }
+                disabled={loading}
               >
 
-                {currentQuestion ===
-                questions.length - 1
-                  ? "Voir mon résultat"
-                  : "Question suivante"}
+                {loading
+                  ? "Enregistrement..."
+                  : currentQuestion ===
+                    questions.length - 1
+                    ? "Voir mon résultat"
+                    : "Question suivante"}
 
               </button>
 

@@ -5,14 +5,18 @@ import {
   type ReactNode,
 } from "react";
 
-import { generateQuiz } from "../services/api";
+import {
+  generateQuiz,
+  checkQuizAnswer,
+  submitQuiz,
+} from "../services/api";
 
 
 export type QuizQuestion = {
+  id: number;
   question: string;
   options: string[];
-  correct_answer: number;
-  explanation: string;
+  difficulty: string;
 };
 
 
@@ -34,6 +38,10 @@ type QuizContextType = {
   loading: boolean;
   message: string;
 
+  currentAnswerCorrect: boolean | null;
+  currentCorrectAnswer: number | null;
+  currentExplanation: string;
+
   setDocument: (value: string) => void;
   setQuestionCount: (value: string) => void;
   setDifficulty: (value: string) => void;
@@ -41,9 +49,8 @@ type QuizContextType = {
   startQuiz: () => Promise<void>;
 
   selectAnswer: (answerIndex: number) => void;
-  showQuestionCorrection: () => void;
-  nextQuestion: () => void;
-  previousQuestion: () => void;
+  showQuestionCorrection: () => Promise<void>;
+  nextQuestion: () => Promise<void>;
 
   returnToQuizHome: () => void;
 
@@ -105,6 +112,26 @@ export function QuizProvider({
     useState("");
 
 
+  const [
+    currentAnswerCorrect,
+    setCurrentAnswerCorrect
+  ] = useState<boolean | null>(null);
+
+  const [
+    currentCorrectAnswer,
+    setCurrentCorrectAnswer
+  ] = useState<number | null>(null);
+
+  const [
+    currentExplanation,
+    setCurrentExplanation
+  ] = useState("");
+
+
+  const [score, setScore] =
+    useState(0);
+
+
   async function startQuiz() {
 
     setMessage("");
@@ -120,6 +147,7 @@ export function QuizProvider({
 
 
       if (!result.response.ok) {
+
         throw new Error(
           result.data.detail ||
           "Erreur lors de la génération du quiz."
@@ -131,26 +159,58 @@ export function QuizProvider({
         !result.data.questions ||
         !Array.isArray(result.data.questions)
       ) {
+
         throw new Error(
           "Le serveur n'a pas retourné de questions valides."
         );
       }
 
 
+      const validQuestions =
+        result.data.questions.filter(
+          (
+            question: QuizQuestion
+          ) =>
+            typeof question.id === "number" &&
+            typeof question.question === "string" &&
+            Array.isArray(question.options) &&
+            question.options.length === 4 &&
+            typeof question.difficulty === "string"
+        );
+
+
+      if (
+        validQuestions.length !==
+        result.data.questions.length
+      ) {
+
+        throw new Error(
+          "Certaines questions reçues du serveur sont invalides."
+        );
+      }
+
+
       setQuestions(
-        result.data.questions
+        validQuestions
       );
 
       setCurrentQuestion(0);
 
       setAnswers([]);
 
+      setScore(0);
+
       setShowCorrection(false);
 
       setFinished(false);
 
-      setQuizStarted(true);
+      setCurrentAnswerCorrect(null);
 
+      setCurrentCorrectAnswer(null);
+
+      setCurrentExplanation("");
+
+      setQuizStarted(true);
 
     } catch (error) {
 
@@ -159,20 +219,20 @@ export function QuizProvider({
 
       if (error instanceof Error) {
 
-        setMessage(error.message);
+        setMessage(
+          error.message
+        );
 
       } else {
 
         setMessage(
           "Une erreur est survenue lors de la génération du quiz."
         );
-
       }
 
     } finally {
 
       setLoading(false);
-
     }
   }
 
@@ -181,20 +241,32 @@ export function QuizProvider({
     answerIndex: number
   ) {
 
-    if (showCorrection || finished) {
+    if (
+      showCorrection ||
+      finished
+    ) {
+      return;
+    }
+
+
+    if (
+      answerIndex < 0 ||
+      answerIndex > 3
+    ) {
       return;
     }
 
 
     setAnswers((previous) => {
 
-      const updated = [...previous];
+      const updated = [
+        ...previous
+      ];
 
       updated[currentQuestion] =
         answerIndex;
 
       return updated;
-
     });
 
 
@@ -202,11 +274,14 @@ export function QuizProvider({
   }
 
 
-  function showQuestionCorrection() {
+  async function showQuestionCorrection() {
+
+    const selectedAnswer =
+      answers[currentQuestion];
+
 
     if (
-      answers[currentQuestion] ===
-      undefined
+      selectedAnswer === undefined
     ) {
 
       setMessage(
@@ -217,55 +292,210 @@ export function QuizProvider({
     }
 
 
+    const question =
+      questions[currentQuestion];
+
+
+    if (!question) {
+
+      setMessage(
+        "Question introuvable."
+      );
+
+      return;
+    }
+
+
+    setLoading(true);
+
     setMessage("");
 
-    setShowCorrection(true);
+
+    try {
+
+      const result =
+        await checkQuizAnswer(
+          question.id,
+          selectedAnswer
+        );
+
+
+      if (!result.response.ok) {
+
+        throw new Error(
+          result.data.detail ||
+          "Impossible de vérifier la réponse."
+        );
+      }
+
+
+      setCurrentAnswerCorrect(
+        result.data.is_correct
+      );
+
+      setCurrentCorrectAnswer(
+        result.data.correct_answer
+      );
+
+      setCurrentExplanation(
+        result.data.explanation ||
+        ""
+      );
+
+      setShowCorrection(true);
+
+    } catch (error) {
+
+      console.error(
+        "Erreur lors de la vérification de la réponse :",
+        error
+      );
+
+
+      if (
+        error instanceof Error
+      ) {
+
+        setMessage(
+          error.message
+        );
+
+      } else {
+
+        setMessage(
+          "Erreur lors de la vérification de la réponse."
+        );
+      }
+
+    } finally {
+
+      setLoading(false);
+    }
   }
 
 
-  function nextQuestion() {
+  async function nextQuestion() {
 
     if (
       currentQuestion ===
       questions.length - 1
     ) {
 
-      setFinished(true);
+      setLoading(true);
 
-      setShowCorrection(false);
+      setMessage("");
+
+      try {
+
+        const formattedAnswers =
+          questions.map(
+            (
+              question,
+              index
+            ) => {
+
+              const answer =
+                answers[index];
+
+              if (
+                answer === undefined
+              ) {
+                throw new Error(
+                  "Toutes les questions doivent avoir une réponse."
+                );
+              }
+
+              return {
+                question_id:
+                  question.id,
+                answer,
+              };
+            }
+          );
+
+
+        const result =
+          await submitQuiz(
+            formattedAnswers
+          );
+
+
+        if (!result.response.ok) {
+
+          throw new Error(
+            result.data.detail ||
+            "Impossible d'enregistrer le quiz."
+          );
+        }
+
+
+        if (
+          typeof result.data.score !==
+          "number"
+        ) {
+
+          throw new Error(
+            "Le serveur n'a pas retourné de score valide."
+          );
+        }
+
+
+        setScore(
+          result.data.score
+        );
+
+        setFinished(true);
+
+        setShowCorrection(false);
+
+        setMessage("");
+
+      } catch (error) {
+
+        console.error(
+          "Erreur lors de l'enregistrement du quiz :",
+          error
+        );
+
+
+        if (
+          error instanceof Error
+        ) {
+
+          setMessage(
+            error.message
+          );
+
+        } else {
+
+          setMessage(
+            "Erreur lors de l'enregistrement du quiz."
+          );
+        }
+
+      } finally {
+
+        setLoading(false);
+      }
 
       return;
     }
 
 
     setCurrentQuestion(
-      (previous) => previous + 1
+      (previous) =>
+        previous + 1
     );
 
     setShowCorrection(false);
 
-    setMessage("");
-  }
+    setCurrentAnswerCorrect(null);
 
+    setCurrentCorrectAnswer(null);
 
-  function previousQuestion() {
-
-    if (showCorrection) {
-      return;
-    }
-
-
-    if (currentQuestion === 0) {
-      return;
-    }
-
+    setCurrentExplanation("");
 
     setMessage("");
-
-
-    setCurrentQuestion(
-      (previous) => previous - 1
-    );
   }
 
 
@@ -277,38 +507,22 @@ export function QuizProvider({
 
     setAnswers([]);
 
+    setScore(0);
+
     setShowCorrection(false);
 
     setFinished(false);
 
     setQuestions([]);
 
+    setCurrentAnswerCorrect(null);
+
+    setCurrentCorrectAnswer(null);
+
+    setCurrentExplanation("");
+
     setMessage("");
   }
-
-
-  const score = answers.reduce(
-    (
-      total,
-      answer,
-      index
-    ) => {
-
-      if (
-        answer !== undefined &&
-        answer ===
-          questions[index]?.correct_answer
-      ) {
-
-        return total + 1;
-
-      }
-
-      return total;
-
-    },
-    0
-  );
 
 
   return (
@@ -331,6 +545,10 @@ export function QuizProvider({
         loading,
         message,
 
+        currentAnswerCorrect,
+        currentCorrectAnswer,
+        currentExplanation,
+
         setDocument,
         setQuestionCount,
         setDifficulty,
@@ -340,7 +558,6 @@ export function QuizProvider({
         selectAnswer,
         showQuestionCorrection,
         nextQuestion,
-        previousQuestion,
 
         returnToQuizHome,
 
@@ -356,7 +573,9 @@ export function QuizProvider({
 export function useQuiz() {
 
   const context =
-    useContext(QuizContext);
+    useContext(
+      QuizContext
+    );
 
 
   if (!context) {
@@ -364,7 +583,6 @@ export function useQuiz() {
     throw new Error(
       "useQuiz doit être utilisé à l'intérieur de QuizProvider."
     );
-
   }
 
 
