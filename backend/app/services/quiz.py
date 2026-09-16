@@ -12,8 +12,10 @@ GENERATION_THRESHOLD = 35
 TARGET_QUESTION_COUNT = 50
 QUESTION_LIMIT_PER_CHUNK = 5
 
-BATCH_SIZE = 5
-MAX_ATTEMPTS = 3
+BATCH_SIZE = 2
+MAX_ATTEMPTS = 10
+MAX_EMPTY_PASSES = 3
+
 QUIZ_NUM_PREDICT = 1000
 
 
@@ -25,7 +27,7 @@ llm = OllamaLLM(
     model="llama3.2:latest",
     num_predict=QUIZ_NUM_PREDICT,
     format="json",
-    temperature=0.2
+    temperature=0.5
 )
 
 
@@ -47,6 +49,7 @@ def clean_json_response(response: str) -> str:
             response,
             flags=re.IGNORECASE
         )
+
         response = re.sub(
             r"\s*```$",
             "",
@@ -77,52 +80,102 @@ def validate_quiz(data):
         return False
 
     for question in questions:
+
         if not isinstance(question, dict):
             return False
 
-        if not isinstance(question.get("question"), str):
+        question_text = question.get("question")
+
+        if not isinstance(
+            question_text,
+            str
+        ):
             return False
 
-        if not isinstance(question.get("options"), list):
+        if not question_text.strip():
             return False
 
-        if len(question["options"]) != 4:
+        options = question.get("options")
+
+        if not isinstance(
+            options,
+            list
+        ):
+            return False
+
+        if len(options) != 4:
             return False
 
         if not all(
             isinstance(option, str)
-            for option in question["options"]
+            and option.strip()
+            for option in options
         ):
             return False
 
-        correct_answer = question.get("correct_answer")
+        normalized_options = [
+            normalize_question(option)
+            for option in options
+        ]
 
-        if not isinstance(correct_answer, int):
+        if len(
+            set(normalized_options)
+        ) != 4:
             return False
 
-        if correct_answer not in {0, 1, 2, 3}:
-            return False
+        correct_answer = question.get(
+            "correct_answer"
+        )
 
         if not isinstance(
-            question.get("explanation"),
+            correct_answer,
+            int
+        ):
+            return False
+
+        if correct_answer not in {
+            0,
+            1,
+            2,
+            3
+        }:
+            return False
+
+        explanation = question.get(
+            "explanation"
+        )
+
+        if not isinstance(
+            explanation,
             str
         ):
+            return False
+
+        if not explanation.strip():
             return False
 
     return True
 
 
 def parse_quiz_response(response: str):
-    cleaned_response = clean_json_response(response)
+    cleaned_response = clean_json_response(
+        response
+    )
 
     try:
-        data = json.loads(cleaned_response)
+
+        data = json.loads(
+            cleaned_response
+        )
+
     except json.JSONDecodeError as error:
+
         raise ValueError(
             f"JSON invalide retourné par le LLM : {error}"
         )
 
     if not validate_quiz(data):
+
         raise ValueError(
             "Le format du quiz généré est invalide."
         )
@@ -130,62 +183,134 @@ def parse_quiz_response(response: str):
     return data["questions"]
 
 
-def get_documents_scope(document: str):
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT id
-                FROM documents
-                WHERE file_name = %s
-                """,
-                (document,)
+def get_documents_scope(
+    document: str
+):
+    document_ids = None
+
+    if document == "all":
+
+        with get_connection() as conn:
+
+            with conn.cursor() as cursor:
+
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM documents
+                    ORDER BY id
+                    """
+                )
+
+                rows = cursor.fetchall()
+
+        document_ids = [
+            row[0]
+            for row in rows
+        ]
+
+    else:
+
+        with get_connection() as conn:
+
+            with conn.cursor() as cursor:
+
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM documents
+                    WHERE file_name = %s
+                    """,
+                    (document,)
+                )
+
+                result = cursor.fetchone()
+
+        if result is None:
+
+            raise ValueError(
+                f"Document introuvable : {document}"
             )
 
-            result = cursor.fetchone()
+        document_ids = [
+            result[0]
+        ]
 
-    if result is None:
-        raise ValueError(
-            f"Document introuvable : {document}"
-        )
-
-    return [result[0]]
+    return document_ids
 
 
-def get_available_chunks(document: str):
-    document_ids = get_documents_scope(document)
+def get_available_chunks(
+    document: str,
+    difficulty: str
+):
+    """
+    Retourne les chunks qui peuvent encore recevoir
+    des questions pour la difficulté demandée.
+
+    La limite de 5 questions est indépendante
+    pour chaque difficulté.
+    """
+
+    document_ids = get_documents_scope(
+        document
+    )
 
     with get_connection() as conn:
+
         with conn.cursor() as cursor:
+
             cursor.execute(
                 """
                 SELECT
-                    id,
-                    chroma_id,
-                    question_count,
-                    question_limit
-                FROM document_chunks
-                WHERE document_id = ANY(%s)
-                  AND question_count < question_limit
-                ORDER BY id
+                    dc.id,
+                    dc.chroma_id,
+                    COUNT(qq.id) AS difficulty_count
+                FROM document_chunks dc
+
+                LEFT JOIN quiz_questions qq
+                    ON qq.chunk_id = dc.id
+                    AND qq.difficulty = %s
+
+                WHERE dc.document_id = ANY(%s)
+
+                GROUP BY
+                    dc.id,
+                    dc.chroma_id
+
+                HAVING COUNT(qq.id) < %s
+
+                ORDER BY dc.id
                 """,
-                (document_ids,)
+                (
+                    difficulty,
+                    document_ids,
+                    QUESTION_LIMIT_PER_CHUNK
+                )
             )
 
             return cursor.fetchall()
 
 
-def count_questions(document: str, difficulty: str):
-    document_ids = get_documents_scope(document)
+def count_questions(
+    document: str,
+    difficulty: str
+):
+    document_ids = get_documents_scope(
+        document
+    )
 
     with get_connection() as conn:
+
         with conn.cursor() as cursor:
+
             cursor.execute(
                 """
                 SELECT COUNT(*)
                 FROM quiz_questions qq
+
                 JOIN document_chunks dc
                     ON qq.chunk_id = dc.id
+
                 WHERE dc.document_id = ANY(%s)
                   AND qq.difficulty = %s
                 """,
@@ -198,11 +323,25 @@ def count_questions(document: str, difficulty: str):
             return cursor.fetchone()[0]
 
 
-def get_max_capacity(document: str):
-    document_ids = get_documents_scope(document)
+def get_max_capacity(
+    document: str
+):
+    """
+    Capacité maximale pour une difficulté.
+
+    Chaque difficulté possède sa propre capacité :
+
+    nombre de chunks × 5 questions.
+    """
+
+    document_ids = get_documents_scope(
+        document
+    )
 
     with get_connection() as conn:
+
         with conn.cursor() as cursor:
+
             cursor.execute(
                 """
                 SELECT COALESCE(
@@ -222,18 +361,24 @@ def get_existing_questions(
     document: str,
     difficulty: str
 ):
-    document_ids = get_documents_scope(document)
+    document_ids = get_documents_scope(
+        document
+    )
 
     with get_connection() as conn:
+
         with conn.cursor() as cursor:
+
             cursor.execute(
                 """
                 SELECT
                     qq.id,
                     qq.question
                 FROM quiz_questions qq
+
                 JOIN document_chunks dc
                     ON qq.chunk_id = dc.id
+
                 WHERE dc.document_id = ANY(%s)
                   AND qq.difficulty = %s
                 """,
@@ -251,20 +396,29 @@ def get_user_seen_question_ids(
     document: str,
     difficulty: str
 ):
-    document_ids = get_documents_scope(document)
+    document_ids = get_documents_scope(
+        document
+    )
 
     with get_connection() as conn:
+
         with conn.cursor() as cursor:
+
             cursor.execute(
                 """
                 SELECT DISTINCT qaq.question_id
+
                 FROM quiz_attempt_questions qaq
+
                 JOIN quiz_results qr
                     ON qaq.quiz_result_id = qr.id
+
                 JOIN quiz_questions qq
                     ON qaq.question_id = qq.id
+
                 JOIN document_chunks dc
                     ON qq.chunk_id = dc.id
+
                 WHERE qr.user_id = %s
                   AND dc.document_id = ANY(%s)
                   AND qq.difficulty = %s
@@ -282,20 +436,41 @@ def get_user_seen_question_ids(
             }
 
 
-def get_chunk_context(chroma_id: str):
+def get_chunk_context(
+    chroma_id: str
+):
     result = collection.get(
         ids=[chroma_id],
         include=["documents"]
     )
 
-    documents = result.get("documents", [])
+    documents = result.get(
+        "documents",
+        []
+    )
 
     if not documents:
+
         raise ValueError(
             f"Chunk introuvable dans ChromaDB : {chroma_id}"
         )
 
-    return documents[0]
+    context = documents[0]
+
+    if not isinstance(
+        context,
+        str
+    ):
+        raise ValueError(
+            "Le contenu du chunk est invalide."
+        )
+
+    if not context.strip():
+        raise ValueError(
+            "Le chunk ne contient aucun texte."
+        )
+
+    return context
 
 
 def build_excluded_questions(
@@ -308,7 +483,9 @@ def build_excluded_questions(
     )
 
     return {
-        normalize_question(question[1])
+        normalize_question(
+            question[1]
+        )
         for question in existing_questions
     }
 
@@ -316,21 +493,84 @@ def build_excluded_questions(
 def generate_quiz_batch(
     context: str,
     difficulty: str,
-    excluded_questions: set[str]
+    excluded_questions: set[str],
+    batch_size: int = BATCH_SIZE
 ):
-    prompt = f"""
-Tu es un expert en cybersécurité chargé de créer des questions
-à choix multiple à partir du contenu fourni.
+    last_error = None
 
-Contenu du document :
+    for attempt in range(
+        1,
+        MAX_ATTEMPTS + 1
+    ):
+
+        variation_instructions = [
+            """
+Change complètement l'angle des questions.
+Ne demande pas simplement une définition.
+""",
+            """
+Pose des questions sur les conséquences,
+les objectifs, les caractéristiques ou les mécanismes.
+""",
+            """
+Utilise des situations concrètes de cybersécurité
+lorsque le contenu source le permet.
+""",
+            """
+Cherche des détails précis du contenu source
+qui n'ont pas encore été utilisés.
+""",
+            """
+Évite absolument les questions classiques
+ou déjà vues et cherche un autre aspect du contenu.
+""",
+            """
+Varie fortement la formulation et le concept testé.
+Ne reformule pas une question précédente.
+""",
+            """
+Utilise uniquement des informations précises
+du contenu source mais explore un nouvel aspect.
+""",
+            """
+Construis des questions différentes des questions
+habituelles sur ce sujet.
+""",
+            """
+Cherche un détail secondaire du contenu source
+pour construire la question.
+""",
+            """
+Dernière tentative : produis des questions
+totalement nouvelles et non redondantes.
+"""
+        ]
+
+        variation_instruction = (
+            variation_instructions[
+                min(
+                    attempt - 1,
+                    len(variation_instructions) - 1
+                )
+            ]
+        )
+
+        prompt = f"""
+Tu es un expert en cybersécurité chargé de créer
+des questions à choix multiple.
+
+CONTENU SOURCE :
 {context}
 
-Génère exactement {BATCH_SIZE} questions.
-
-Difficulté demandée :
+DIFFICULTÉ :
 {difficulty}
 
-Chaque question doit respecter exactement cette structure :
+NOMBRE DE QUESTIONS :
+{batch_size}
+
+Tu dois générer exactement {batch_size} question(s).
+
+FORMAT OBLIGATOIRE :
 
 {{
   "questions": [
@@ -348,27 +588,57 @@ Chaque question doit respecter exactement cette structure :
   ]
 }}
 
-Règles :
+RÈGLES ABSOLUES :
 
-- Une seule réponse doit être correcte.
-- correct_answer doit être 0, 1, 2 ou 3.
-- Les quatre options doivent être différentes.
-- Les questions doivent être basées uniquement sur le contenu fourni.
-- Ne crée pas de question dont la réponse n'est pas justifiable par le contenu.
-- Ne répète pas les questions suivantes :
+1. Retourne uniquement du JSON.
+2. N'utilise jamais de Markdown.
+3. Ne mets jamais le JSON dans ```json.
+4. "questions" doit être une liste.
+5. Chaque question doit contenir exactement 4 options.
+6. Les 4 options doivent être différentes.
+7. "correct_answer" doit être un entier : 0, 1, 2 ou 3.
+8. L'option située à l'index correct_answer doit être la seule bonne réponse.
+9. "explanation" doit expliquer clairement la bonne réponse.
+10. Les questions doivent être basées uniquement sur le contenu source fourni.
+11. Ne crée aucune information absente du contenu source.
+12. La difficulté demandée doit être respectée.
+13. Les questions doivent être réellement différentes entre elles.
+14. Ne reformule pas simplement la même question.
+15. Les options doivent être cohérentes avec la question.
+16. La question et ses options doivent être rédigées dans la même langue que le contenu source.
+17. Si la question demande un terme anglais, une option doit réellement contenir ce terme anglais.
+18. Ne mets jamais une réponse qui contredit directement la question.
+19. Ne mets jamais plusieurs réponses correctes.
+20. Ne mets jamais une option vide.
+21. Ne répète pas une question déjà générée.
+22. Chaque question doit tester un aspect différent du contenu source.
+23. Ne produis pas deux questions qui demandent essentiellement
+    la même information.
+24. Si une information a déjà été utilisée sous une forme
+    évidente, choisis une autre information du contenu source.
 
-{json.dumps(
-    list(excluded_questions),
-    ensure_ascii=False
-)}
+INSTRUCTION DE VARIATION :
 
-Retourne uniquement le JSON.
+{variation_instruction}
+
+IMPORTANT :
+
+Le programme vérifiera lui-même les doublons.
+
+Tu dois donc produire des questions nouvelles,
+même si le contenu source est court.
+
+Ne cherche pas à remplir artificiellement la quantité
+demandée avec des reformulations.
+
+Retourne uniquement l'objet JSON final.
 """
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-
         try:
-            response = llm.invoke(prompt)
+
+            response = llm.invoke(
+                prompt
+            )
 
             questions = parse_quiz_response(
                 response
@@ -376,32 +646,60 @@ Retourne uniquement le JSON.
 
             valid_questions = []
 
+            local_questions = set(
+                excluded_questions
+            )
+
             for question in questions:
 
                 normalized = normalize_question(
                     question["question"]
                 )
 
-                if normalized in excluded_questions:
+                if normalized in local_questions:
+
+                    print(
+                        f"[Quiz] "
+                        f"Tentative {attempt}/{MAX_ATTEMPTS} : "
+                        f"question déjà existante rejetée."
+                    )
+
                     continue
 
-                if any(
-                    normalize_question(
-                        existing["question"]
-                    ) == normalized
-                    for existing in valid_questions
-                ):
-                    continue
+                local_questions.add(
+                    normalized
+                )
 
-                valid_questions.append(question)
+                valid_questions.append(
+                    question
+                )
 
-                if len(valid_questions) >= BATCH_SIZE:
+                if len(
+                    valid_questions
+                ) >= batch_size:
+
                     break
 
             if valid_questions:
+
                 return valid_questions
 
+            last_error = (
+                "Le LLM a retourné des questions "
+                "mais elles étaient toutes déjà présentes."
+            )
+
+            print(
+                f"[Quiz] "
+                f"Tentative {attempt}/{MAX_ATTEMPTS} : "
+                f"aucune nouvelle question."
+            )
+
         except Exception as error:
+
+            last_error = str(
+                error
+            )
 
             print(
                 f"Erreur génération quiz "
@@ -411,6 +709,11 @@ Retourne uniquement le JSON.
 
     raise ValueError(
         "Impossible de générer un lot de questions valide."
+        + (
+            f" Dernière erreur : {last_error}"
+            if last_error
+            else ""
+        )
     )
 
 
@@ -422,6 +725,7 @@ def save_questions(
     saved_questions = []
 
     with get_connection() as conn:
+
         with conn.cursor() as cursor:
 
             for question in questions:
@@ -432,7 +736,7 @@ def save_questions(
 
                 cursor.execute(
                     """
-                    SELECT id
+                    SELECT question
                     FROM quiz_questions
                     WHERE chunk_id = %s
                       AND difficulty = %s
@@ -443,33 +747,45 @@ def save_questions(
                     )
                 )
 
-                existing = cursor.fetchall()
+                existing_questions = (
+                    cursor.fetchall()
+                )
 
                 duplicate = False
 
-                for row in existing:
-
-                    cursor.execute(
-                        """
-                        SELECT question
-                        FROM quiz_questions
-                        WHERE id = %s
-                        """,
-                        (row[0],)
-                    )
-
-                    existing_question = cursor.fetchone()
-
-                    if existing_question is None:
-                        continue
+                for row in existing_questions:
 
                     if normalize_question(
-                        existing_question[0]
+                        row[0]
                     ) == normalized:
+
                         duplicate = True
                         break
 
                 if duplicate:
+                    continue
+
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM quiz_questions
+                    WHERE chunk_id = %s
+                      AND difficulty = %s
+                    """,
+                    (
+                        chunk_id,
+                        difficulty
+                    )
+                )
+
+                current_count = (
+                    cursor.fetchone()[0]
+                )
+
+                if (
+                    current_count
+                    >= QUESTION_LIMIT_PER_CHUNK
+                ):
                     continue
 
                 cursor.execute(
@@ -507,15 +823,8 @@ def save_questions(
                     )
                 )
 
-                question_id = cursor.fetchone()[0]
-
-                cursor.execute(
-                    """
-                    UPDATE document_chunks
-                    SET question_count = question_count + 1
-                    WHERE id = %s
-                    """,
-                    (chunk_id,)
+                question_id = (
+                    cursor.fetchone()[0]
                 )
 
                 saved_questions.append(
@@ -539,19 +848,50 @@ def generate_questions_for_bank(
     difficulty: str,
     target_count: int
 ):
+    """
+    Génère progressivement la banque d'une difficulté.
+
+    Un échec du LLM sur un chunk ne bloque pas
+    les autres chunks.
+
+    Les lots peuvent être partiels.
+
+    La génération s'arrête uniquement lorsqu'il n'existe
+    plus de capacité disponible ou lorsque plusieurs
+    passages complets n'ont produit aucune nouvelle
+    question.
+    """
+
     generated_count = count_questions(
         document,
         difficulty
     )
 
+    print(
+        f"[{difficulty.upper()}] "
+        f"Banque actuelle : "
+        f"{generated_count}/{target_count}"
+    )
+
+    empty_passes = 0
+
     while generated_count < target_count:
 
-        chunks = get_available_chunks(document)
+        chunks = get_available_chunks(
+            document,
+            difficulty
+        )
 
         if not chunks:
+
+            print(
+                f"[{difficulty.upper()}] "
+                f"Aucun chunk disponible."
+            )
+
             break
 
-        generated_in_batch = False
+        generated_in_pass = False
 
         for chunk in chunks:
 
@@ -560,11 +900,11 @@ def generate_questions_for_bank(
 
             chunk_id = chunk[0]
             chroma_id = chunk[1]
-            question_count = chunk[2]
-            question_limit = chunk[3]
+            difficulty_count = chunk[2]
 
             remaining_capacity = (
-                question_limit - question_count
+                QUESTION_LIMIT_PER_CHUNK
+                - difficulty_count
             )
 
             if remaining_capacity <= 0:
@@ -576,39 +916,92 @@ def generate_questions_for_bank(
                 target_count - generated_count
             )
 
-            context = get_chunk_context(
-                chroma_id
-            )
+            try:
 
-            excluded_questions = (
-                build_excluded_questions(
-                    document,
-                    difficulty
+                context = get_chunk_context(
+                    chroma_id
                 )
-            )
 
-            questions = generate_quiz_batch(
-                context=context,
-                difficulty=difficulty,
-                excluded_questions=excluded_questions
-            )
-
-            questions = questions[:batch_size]
-
-            saved_questions = save_questions(
-                chunk_id=chunk_id,
-                questions=questions,
-                difficulty=difficulty
-            )
-
-            if saved_questions:
-                generated_count += len(
-                    saved_questions
+                excluded_questions = (
+                    build_excluded_questions(
+                        document,
+                        difficulty
+                    )
                 )
-                generated_in_batch = True
 
-        if not generated_in_batch:
-            break
+                questions = generate_quiz_batch(
+                    context=context,
+                    difficulty=difficulty,
+                    excluded_questions=excluded_questions,
+                    batch_size=batch_size
+                )
+
+                questions = questions[
+                    :batch_size
+                ]
+
+                saved_questions = save_questions(
+                    chunk_id=chunk_id,
+                    questions=questions,
+                    difficulty=difficulty
+                )
+
+                if saved_questions:
+
+                    generated_count += len(
+                        saved_questions
+                    )
+
+                    generated_in_pass = True
+
+                    print(
+                        f"[{difficulty.upper()}] "
+                        f"+{len(saved_questions)} "
+                        f"questions "
+                        f"→ {generated_count}/{target_count}"
+                    )
+
+            except Exception as error:
+
+                print(
+                    f"[{difficulty.upper()}] "
+                    f"Chunk {chunk_id} ignoré : "
+                    f"{error}"
+                )
+
+                continue
+
+        if generated_in_pass:
+
+            empty_passes = 0
+
+        else:
+
+            empty_passes += 1
+
+            print(
+                f"[{difficulty.upper()}] "
+                f"Aucune nouvelle question "
+                f"pendant ce passage "
+                f"({empty_passes}/{MAX_EMPTY_PASSES})."
+            )
+
+            if empty_passes >= MAX_EMPTY_PASSES:
+
+                print(
+                    f"[{difficulty.upper()}] "
+                    f"Arrêt de sécurité : "
+                    f"aucune progression après "
+                    f"{MAX_EMPTY_PASSES} passages."
+                )
+
+                break
+
+    print(
+        f"[{difficulty.upper()}] "
+        f"Banque terminée : "
+        f"{generated_count} questions"
+    )
 
     return generated_count
 
@@ -619,15 +1012,20 @@ def get_random_questions(
     question_count: int,
     user_id: int
 ):
-    document_ids = get_documents_scope(document)
+    document_ids = get_documents_scope(
+        document
+    )
 
-    seen_question_ids = get_user_seen_question_ids(
-        user_id=user_id,
-        document=document,
-        difficulty=difficulty
+    seen_question_ids = (
+        get_user_seen_question_ids(
+            user_id=user_id,
+            document=document,
+            difficulty=difficulty
+        )
     )
 
     with get_connection() as conn:
+
         with conn.cursor() as cursor:
 
             if seen_question_ids:
@@ -640,12 +1038,16 @@ def get_random_questions(
                         qq.options,
                         qq.difficulty
                     FROM quiz_questions qq
+
                     JOIN document_chunks dc
                         ON qq.chunk_id = dc.id
+
                     WHERE dc.document_id = ANY(%s)
                       AND qq.difficulty = %s
                       AND NOT (qq.id = ANY(%s))
+
                     ORDER BY RANDOM()
+
                     LIMIT %s
                     """,
                     (
@@ -666,11 +1068,15 @@ def get_random_questions(
                         qq.options,
                         qq.difficulty
                     FROM quiz_questions qq
+
                     JOIN document_chunks dc
                         ON qq.chunk_id = dc.id
+
                     WHERE dc.document_id = ANY(%s)
                       AND qq.difficulty = %s
+
                     ORDER BY RANDOM()
+
                     LIMIT %s
                     """,
                     (
@@ -688,8 +1094,14 @@ def get_random_questions(
 
         options = row[2]
 
-        if isinstance(options, str):
-            options = json.loads(options)
+        if isinstance(
+            options,
+            str
+        ):
+
+            options = json.loads(
+                options
+            )
 
         questions.append(
             {
@@ -707,12 +1119,19 @@ def check_quiz_answer(
     question_id: int,
     answer: int
 ):
-    if answer not in {0, 1, 2, 3}:
+    if answer not in {
+        0,
+        1,
+        2,
+        3
+    }:
+
         raise ValueError(
             "La réponse doit être un entier compris entre 0 et 3."
         )
 
     with get_connection() as conn:
+
         with conn.cursor() as cursor:
 
             cursor.execute(
@@ -729,15 +1148,21 @@ def check_quiz_answer(
             result = cursor.fetchone()
 
     if result is None:
+
         raise ValueError(
             "Question introuvable."
         )
 
-    correct_answer = int(result[0])
+    correct_answer = int(
+        result[0]
+    )
+
     explanation = result[1]
 
     return {
-        "is_correct": answer == correct_answer,
+        "is_correct": (
+            answer == correct_answer
+        ),
         "correct_answer": correct_answer,
         "explanation": explanation
     }
@@ -755,6 +1180,7 @@ def generate_quiz(
         15,
         20
     }:
+
         raise ValueError(
             "Le nombre de questions doit être 5, 10, 15 ou 20."
         )
@@ -764,6 +1190,7 @@ def generate_quiz(
         "medium",
         "hard"
     }:
+
         raise ValueError(
             "La difficulté doit être easy, medium ou hard."
         )
@@ -773,6 +1200,7 @@ def generate_quiz(
     )
 
     if max_capacity == 0:
+
         raise ValueError(
             "Aucun chunk disponible pour ce document."
         )

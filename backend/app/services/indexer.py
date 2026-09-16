@@ -25,6 +25,14 @@ DOCUMENTS_DIR = "documents"
 
 QUESTION_LIMIT_PER_CHUNK = 5
 
+QUIZ_DIFFICULTIES = (
+    "easy",
+    "medium",
+    "hard"
+)
+
+QUESTION_BANK_TARGET = 50
+
 
 embeddings = OllamaEmbeddings(
     model="nomic-embed-text"
@@ -99,9 +107,11 @@ def get_all_documents():
             "id": row[0],
             "file": row[1],
             "chunks": row[2],
-            "created_at": row[3].isoformat()
-            if row[3] is not None
-            else None
+            "created_at": (
+                row[3].isoformat()
+                if row[3] is not None
+                else None
+            )
         }
         for row in rows
     ]
@@ -432,6 +442,85 @@ def index_pdf(
         "chunks": len(chunks),
         "skipped": False
     }
+
+
+def generate_document_question_banks(
+    document: str
+):
+
+    """
+    Construit automatiquement les banques
+    easy / medium / hard pour un document.
+
+    Chaque difficulté vise 50 questions,
+    dans la limite de la capacité réelle
+    du document.
+    """
+
+    from app.services.quiz import (
+        generate_questions_for_bank
+    )
+
+    print(
+        "\n"
+        "========================================\n"
+        f"GÉNÉRATION DES BANQUES : {document}\n"
+        "========================================"
+    )
+
+    results = {}
+
+    for difficulty in QUIZ_DIFFICULTIES:
+
+        try:
+
+            print(
+                "\n"
+                f"[{difficulty.upper()}] "
+                "Début de génération..."
+            )
+
+            generated_count = (
+                generate_questions_for_bank(
+                    document=document,
+                    difficulty=difficulty,
+                    target_count=QUESTION_BANK_TARGET
+                )
+            )
+
+            results[difficulty] = {
+                "questions": generated_count,
+                "success": True
+            }
+
+            print(
+                f"[{difficulty.upper()}] "
+                f"Banque terminée : "
+                f"{generated_count} questions"
+            )
+
+        except Exception as error:
+
+            results[difficulty] = {
+                "questions": 0,
+                "success": False,
+                "error": str(error)
+            }
+
+            print(
+                f"[{difficulty.upper()}] "
+                f"Erreur : {error}"
+            )
+
+    print(
+        "\n"
+        "========================================\n"
+        f"BANKS TERMINÉES : {document}\n"
+        f"{results}\n"
+        "========================================\n"
+    )
+
+    return results
 
 
 def index_all_documents():

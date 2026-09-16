@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     HTTPException,
@@ -13,7 +14,8 @@ from app.services.auth import verify_token
 from app.services.indexer import (
     index_pdf,
     get_all_documents,
-    delete_document
+    delete_document,
+    generate_document_question_banks
 )
 
 
@@ -33,13 +35,33 @@ MAX_FILE_SIZE = 20 * 1024 * 1024
 def verify_admin(
     payload: dict
 ):
+
     if payload.get("role") != "admin":
+
         raise HTTPException(
             status_code=403,
             detail=(
                 "Accès refusé. Seuls les administrateurs "
                 "peuvent gérer les documents."
             )
+        )
+
+
+def generate_banks_in_background(
+    filename: str
+):
+
+    try:
+
+        generate_document_question_banks(
+            filename
+        )
+
+    except Exception as error:
+
+        print(
+            f"Erreur génération des banques "
+            f"pour {filename} : {error}"
         )
 
 
@@ -67,12 +89,15 @@ def list_documents(
 
         raise HTTPException(
             status_code=500,
-            detail="Impossible de récupérer les documents."
+            detail=(
+                "Impossible de récupérer les documents."
+            )
         )
 
 
 @router.post("/upload")
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     payload: dict = Depends(verify_token)
 ):
@@ -98,7 +123,9 @@ async def upload_document(
 
         raise HTTPException(
             status_code=400,
-            detail="Seuls les fichiers PDF sont acceptés."
+            detail=(
+                "Seuls les fichiers PDF sont acceptés."
+            )
         )
 
     content = await file.read()
@@ -149,7 +176,27 @@ async def upload_document(
             result
         )
 
-        return result
+        # Même si le PDF était déjà présent,
+        # on vérifie quand même les banques.
+        # Cela permet de compléter les difficultés
+        # manquantes d'un document existant.
+        background_tasks.add_task(
+            generate_banks_in_background,
+            filename
+        )
+
+        return {
+            **result,
+            "question_banks": {
+                "status": "generation_started",
+                "difficulties": [
+                    "easy",
+                    "medium",
+                    "hard"
+                ],
+                "target_per_difficulty": 50
+            }
+        }
 
     except Exception as error:
 
@@ -182,7 +229,10 @@ def remove_document(
 
         raise HTTPException(
             status_code=400,
-            detail="Seuls les fichiers PDF peuvent être supprimés."
+            detail=(
+                "Seuls les fichiers PDF peuvent "
+                "être supprimés."
+            )
         )
 
     try:
@@ -218,6 +268,7 @@ def remove_document(
         raise HTTPException(
             status_code=500,
             detail=(
-                "Erreur lors de la suppression du document."
+                "Erreur lors de la suppression "
+                "du document."
             )
         )

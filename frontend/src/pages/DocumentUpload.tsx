@@ -143,7 +143,7 @@ function DocumentUpload() {
     setLoading(true);
 
     setMessage(
-      "Upload et indexation en cours..."
+      "Ajout du document en cours..."
     );
 
     try {
@@ -158,13 +158,15 @@ function DocumentUpload() {
         if (data.skipped) {
 
           setMessage(
-            `${data.file} est déjà présent dans la base.`
+            `${data.file} est déjà disponible. ` +
+            "Vérification de son contenu en cours..."
           );
 
         } else {
 
           setMessage(
-            `${data.file} ajouté avec succès (${data.chunks} chunks).`
+            `${data.file} a été ajouté avec succès. ` +
+            "La préparation des questions est en cours."
           );
         }
 
@@ -268,7 +270,8 @@ function DocumentUpload() {
 
     const confirmed =
       window.confirm(
-        `Voulez-vous vraiment supprimer "${filename}" ?\n\nCette action supprimera le PDF, ses chunks, ses questions et ses embeddings.`
+        `Voulez-vous vraiment supprimer "${filename}" ?\n\n` +
+        "Cette action supprimera définitivement le document."
       );
 
     if (!confirmed) {
@@ -368,7 +371,7 @@ function DocumentUpload() {
         <h3>
 
           {loading
-            ? "Traitement du PDF..."
+            ? "Traitement du document..."
             : dragging
             ? "Déposez votre PDF ici"
             : "Ajoutez un document PDF"}
@@ -379,7 +382,7 @@ function DocumentUpload() {
         <p>
 
           {loading
-            ? "Upload, extraction et indexation en cours..."
+            ? "Votre document est en cours de préparation..."
             : "Glissez-déposez votre PDF dans cette zone"}
 
         </p>
@@ -428,8 +431,8 @@ function DocumentUpload() {
             </h2>
 
             <p>
-              Documents actuellement intégrés
-              à la plateforme.
+              Documents actuellement disponibles
+              sur la plateforme.
             </p>
 
           </div>
@@ -478,7 +481,7 @@ function DocumentUpload() {
                     </h3>
 
                     <p>
-                      {document.chunks} chunks
+                      Document disponible
                     </p>
 
                   </div>
@@ -493,13 +496,14 @@ function DocumentUpload() {
                       )
                     }
                     disabled={loading}
-                    title={`Supprimer ${document.file}`}
+                    title={
+                      `Supprimer ${document.file}`
+                    }
                   >
                     🗑️
                   </button>
 
                 </div>
-
               )
             )}
 
