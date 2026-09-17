@@ -1,6 +1,8 @@
 import json
 import re
 
+from typing import Callable
+
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 
 from app.database.connection import get_connection
@@ -728,6 +730,36 @@ def save_questions(
 
         with conn.cursor() as cursor:
 
+            # Vérification supplémentaire :
+            # le chunk peut avoir été supprimé/recréé
+            # entre get_available_chunks() et save_questions().
+            cursor.execute(
+                """
+                SELECT id
+                FROM document_chunks
+                WHERE id = %s
+                """,
+                (chunk_id,)
+            )
+
+            chunk_exists = (
+                cursor.fetchone()
+                is not None
+            )
+
+            if not chunk_exists:
+
+                print(
+                    f"[Quiz] "
+                    f"Chunk {chunk_id} introuvable "
+                    f"dans document_chunks. "
+                    f"Il a probablement été supprimé "
+                    f"ou recréé pendant la génération. "
+                    f"Lot ignoré."
+                )
+
+                return []
+
             for question in questions:
 
                 normalized = normalize_question(
@@ -788,6 +820,30 @@ def save_questions(
                 ):
                     continue
 
+                # Nouvelle vérification juste avant
+                # l'insertion afin de réduire le risque
+                # qu'un chunk supprimé entre-temps
+                # provoque une violation de clé étrangère.
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM document_chunks
+                    WHERE id = %s
+                    """,
+                    (chunk_id,)
+                )
+
+                if cursor.fetchone() is None:
+
+                    print(
+                        f"[Quiz] "
+                        f"Chunk {chunk_id} supprimé "
+                        f"avant l'insertion. "
+                        f"Question ignorée."
+                    )
+
+                    continue
+
                 cursor.execute(
                     """
                     INSERT INTO quiz_questions (
@@ -846,7 +902,8 @@ def save_questions(
 def generate_questions_for_bank(
     document: str,
     difficulty: str,
-    target_count: int
+    target_count: int,
+    progress_callback: Callable[[int], None] | None = None
 ):
     """
     Génère progressivement la banque d'une difficulté.
@@ -860,6 +917,9 @@ def generate_questions_for_bank(
     plus de capacité disponible ou lorsque plusieurs
     passages complets n'ont produit aucune nouvelle
     question.
+
+    progress_callback est appelé après chaque progression
+    réelle de la banque.
     """
 
     generated_count = count_questions(
@@ -872,6 +932,12 @@ def generate_questions_for_bank(
         f"Banque actuelle : "
         f"{generated_count}/{target_count}"
     )
+
+    if progress_callback is not None:
+
+        progress_callback(
+            generated_count
+        )
 
     empty_passes = 0
 
@@ -961,6 +1027,12 @@ def generate_questions_for_bank(
                         f"→ {generated_count}/{target_count}"
                     )
 
+                    if progress_callback is not None:
+
+                        progress_callback(
+                            generated_count
+                        )
+
             except Exception as error:
 
                 print(
@@ -1002,6 +1074,12 @@ def generate_questions_for_bank(
         f"Banque terminée : "
         f"{generated_count} questions"
     )
+
+    if progress_callback is not None:
+
+        progress_callback(
+            generated_count
+        )
 
     return generated_count
 

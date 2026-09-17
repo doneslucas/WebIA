@@ -13,6 +13,7 @@ import {
   uploadDocument,
   getDocuments,
   deleteDocument,
+  getGenerationProgress,
 } from "../services/api";
 
 import "./DocumentUpload.css";
@@ -23,6 +24,24 @@ type DocumentItem = {
   file: string;
   chunks: number;
   created_at: string | null;
+};
+
+
+type DifficultyProgress = {
+  status: string;
+  current: number;
+  target: number;
+  progress: number;
+};
+
+
+type GenerationProgress = {
+  document: string;
+  status: string;
+  global_progress: number;
+  easy: DifficultyProgress;
+  medium: DifficultyProgress;
+  hard: DifficultyProgress;
 };
 
 
@@ -43,8 +62,46 @@ function DocumentUpload() {
   const [loadingDocuments, setLoadingDocuments] =
     useState(true);
 
+  const [
+    generationProgress,
+    setGenerationProgress,
+  ] = useState<GenerationProgress | null>(
+    null
+  );
+
   const fileInputRef =
     useRef<HTMLInputElement>(null);
+
+  const pollingRef =
+    useRef<number | null>(null);
+
+
+  function stopProgressPolling() {
+
+    if (
+      pollingRef.current !== null
+    ) {
+
+      window.clearInterval(
+        pollingRef.current
+      );
+
+      pollingRef.current = null;
+    }
+  }
+
+
+  useEffect(() => {
+
+    loadDocuments();
+
+    return () => {
+
+      stopProgressPolling();
+
+    };
+
+  }, []);
 
 
   async function loadDocuments() {
@@ -101,13 +158,6 @@ function DocumentUpload() {
   }
 
 
-  useEffect(() => {
-
-    loadDocuments();
-
-  }, []);
-
-
   function openFilePicker() {
 
     if (loading) {
@@ -115,6 +165,93 @@ function DocumentUpload() {
     }
 
     fileInputRef.current?.click();
+  }
+
+
+  async function checkGenerationProgress(
+    filename: string
+  ) {
+
+    try {
+
+      const {
+        response,
+        data,
+      } = await getGenerationProgress(
+        filename
+      );
+
+      if (!response.ok) {
+
+        console.error(
+          "Erreur progression :",
+          data
+        );
+
+        return;
+      }
+
+      setGenerationProgress(
+        data
+      );
+
+      if (
+        data.status === "completed"
+      ) {
+
+        setMessage(
+          `${filename} : génération des questions terminée.`
+        );
+
+        stopProgressPolling();
+
+        await loadDocuments();
+
+        return;
+      }
+
+      if (
+        data.status === "error"
+      ) {
+
+        setMessage(
+          `${filename} : une erreur est survenue pendant la génération des questions.`
+        );
+
+        stopProgressPolling();
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Erreur lors de la récupération de la progression :",
+        error
+      );
+    }
+  }
+
+
+  function startProgressPolling(
+    filename: string
+  ) {
+
+    stopProgressPolling();
+
+    checkGenerationProgress(
+      filename
+    );
+
+    pollingRef.current =
+      window.setInterval(
+        () => {
+
+          checkGenerationProgress(
+            filename
+          );
+
+        },
+        1000
+      );
   }
 
 
@@ -146,6 +283,12 @@ function DocumentUpload() {
       "Ajout du document en cours..."
     );
 
+    setGenerationProgress(
+      null
+    );
+
+    stopProgressPolling();
+
     try {
 
       const {
@@ -155,22 +298,31 @@ function DocumentUpload() {
 
       if (response.ok) {
 
+        const filename =
+          data.file ||
+          data.filename ||
+          file.name;
+
         if (data.skipped) {
 
           setMessage(
-            `${data.file} est déjà disponible. ` +
+            `${filename} est déjà disponible. ` +
             "Vérification de son contenu en cours..."
           );
 
         } else {
 
           setMessage(
-            `${data.file} a été ajouté avec succès. ` +
-            "La préparation des questions est en cours."
+            `${filename} a été ajouté avec succès. ` +
+            "La génération des questions commence..."
           );
         }
 
         await loadDocuments();
+
+        startProgressPolling(
+          filename
+        );
 
       } else {
 
@@ -301,6 +453,18 @@ function DocumentUpload() {
         );
       }
 
+      if (
+        generationProgress?.document ===
+        filename
+      ) {
+
+        stopProgressPolling();
+
+        setGenerationProgress(
+          null
+        );
+      }
+
       setMessage(
         data.message ||
         `${filename} supprimé avec succès.`
@@ -325,6 +489,90 @@ function DocumentUpload() {
 
       setLoading(false);
     }
+  }
+
+
+  function getStatusLabel(
+    status: string
+  ) {
+
+    switch (status) {
+
+      case "pending":
+        return "En attente";
+
+      case "generating":
+        return "Génération en cours";
+
+      case "completed":
+        return "Terminé";
+
+      case "error":
+        return "Erreur";
+
+      case "not_started":
+        return "Non démarré";
+
+      default:
+        return status;
+    }
+  }
+
+
+  function renderDifficultyProgress(
+    title: string,
+    progress: DifficultyProgress
+  ) {
+
+    return (
+      <div className="generation-difficulty">
+
+        <div className="generation-difficulty-header">
+
+          <h3>
+            {title}
+          </h3>
+
+          <span
+            className={
+              `generation-status generation-status-${progress.status}`
+            }
+          >
+            {getStatusLabel(
+              progress.status
+            )}
+          </span>
+
+        </div>
+
+
+        <div className="generation-progress-info">
+
+          <span>
+            {progress.current} / {progress.target}
+          </span>
+
+          <strong>
+            {progress.progress}%
+          </strong>
+
+        </div>
+
+
+        <div className="generation-progress-bar">
+
+          <div
+            className="generation-progress-bar-fill"
+            style={{
+              width:
+                `${progress.progress}%`,
+            }}
+          />
+
+        </div>
+
+      </div>
+    );
   }
 
 
@@ -416,6 +664,85 @@ function DocumentUpload() {
         <p className="document-upload-message">
           {message}
         </p>
+
+      )}
+
+
+      {generationProgress && (
+
+        <section className="generation-section">
+
+          <div className="generation-section-header">
+
+            <div>
+
+              <h2>
+                Génération des questions
+              </h2>
+
+              <p>
+                {generationProgress.document}
+              </p>
+
+            </div>
+
+            <div className="generation-global-value">
+
+              {generationProgress.global_progress}%
+
+            </div>
+
+          </div>
+
+
+          <div className="generation-global-bar">
+
+            <div
+              className="generation-global-bar-fill"
+              style={{
+                width:
+                  `${generationProgress.global_progress}%`,
+              }}
+            />
+
+          </div>
+
+
+          <div className="generation-global-status">
+
+            <span>
+              État :
+            </span>
+
+            <strong>
+              {getStatusLabel(
+                generationProgress.status
+              )}
+            </strong>
+
+          </div>
+
+
+          <div className="generation-difficulties">
+
+            {renderDifficultyProgress(
+              "Facile",
+              generationProgress.easy
+            )}
+
+            {renderDifficultyProgress(
+              "Moyen",
+              generationProgress.medium
+            )}
+
+            {renderDifficultyProgress(
+              "Difficile",
+              generationProgress.hard
+            )}
+
+          </div>
+
+        </section>
 
       )}
 

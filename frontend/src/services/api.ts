@@ -319,6 +319,28 @@ export async function deleteDocument(
 }
 
 
+export async function getGenerationProgress(
+  filename: string
+) {
+
+  const response =
+    await authenticatedFetch(
+      `${API_URL}/documents/${encodeURIComponent(filename)}/progress`,
+      {
+        method: "GET",
+      }
+    );
+
+  const data =
+    await response.json();
+
+  return {
+    response,
+    data,
+  };
+}
+
+
 export async function getProgress() {
 
   const response =

@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Lock
 
 from fastapi import (
     APIRouter,
@@ -15,7 +16,8 @@ from app.services.indexer import (
     index_pdf,
     get_all_documents,
     delete_document,
-    generate_document_question_banks
+    generate_document_question_banks,
+    get_generation_progress
 )
 
 
@@ -30,6 +32,15 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DOCUMENTS_DIR = BASE_DIR / "documents"
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
+
+
+# ============================================================
+# GESTION DES GÉNÉRATIONS EN COURS
+# ============================================================
+
+generation_in_progress = set()
+
+generation_lock = Lock()
 
 
 def verify_admin(
@@ -51,7 +62,34 @@ def generate_banks_in_background(
     filename: str
 ):
 
+    # --------------------------------------------------------
+    # Vérification atomique :
+    # une seule génération à la fois pour un même fichier.
+    # --------------------------------------------------------
+
+    with generation_lock:
+
+        if filename in generation_in_progress:
+
+            print(
+                f"[Documents] "
+                f"Génération déjà en cours pour {filename}. "
+                f"Nouvelle génération ignorée."
+            )
+
+            return
+
+        generation_in_progress.add(
+            filename
+        )
+
     try:
+
+        print(
+            f"[Documents] "
+            f"Démarrage de la génération des banques "
+            f"pour {filename}"
+        )
 
         generate_document_question_banks(
             filename
@@ -60,8 +98,22 @@ def generate_banks_in_background(
     except Exception as error:
 
         print(
+            f"[Documents] "
             f"Erreur génération des banques "
             f"pour {filename} : {error}"
+        )
+
+    finally:
+
+        with generation_lock:
+
+            generation_in_progress.discard(
+                filename
+            )
+
+        print(
+            f"[Documents] "
+            f"Génération libérée pour {filename}"
         )
 
 
@@ -91,6 +143,54 @@ def list_documents(
             status_code=500,
             detail=(
                 "Impossible de récupérer les documents."
+            )
+        )
+
+
+@router.get("/{filename}/progress")
+def document_progress(
+    filename: str,
+    payload: dict = Depends(verify_token)
+):
+
+    verify_admin(
+        payload
+    )
+
+    filename = Path(
+        filename
+    ).name
+
+    if not filename.lower().endswith(
+        ".pdf"
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Seuls les fichiers PDF sont acceptés."
+            )
+        )
+
+    try:
+
+        return get_generation_progress(
+            filename
+        )
+
+    except Exception as error:
+
+        print(
+            f"Erreur lors de la récupération "
+            f"de la progression pour {filename} : "
+            f"{error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Impossible de récupérer "
+                "la progression de génération."
             )
         )
 
@@ -176,14 +276,38 @@ async def upload_document(
             result
         )
 
-        # Même si le PDF était déjà présent,
-        # on vérifie quand même les banques.
-        # Cela permet de compléter les difficultés
-        # manquantes d'un document existant.
-        background_tasks.add_task(
-            generate_banks_in_background,
-            filename
-        )
+        # ----------------------------------------------------
+        # Lancement de la génération des banques
+        # ----------------------------------------------------
+
+        with generation_lock:
+
+            generation_already_running = (
+                filename
+                in generation_in_progress
+            )
+
+        if generation_already_running:
+
+            print(
+                f"[Documents] "
+                f"Une génération est déjà en cours "
+                f"pour {filename}. "
+                f"Aucune nouvelle tâche ajoutée."
+            )
+
+        else:
+
+            background_tasks.add_task(
+                generate_banks_in_background,
+                filename
+            )
+
+            print(
+                f"[Documents] "
+                f"Génération des banques planifiée "
+                f"pour {filename}"
+            )
 
         return {
             **result,
@@ -243,6 +367,19 @@ def remove_document(
                 DOCUMENTS_DIR
             )
         )
+
+        # ----------------------------------------------------
+        # Sécurité supplémentaire :
+        # si le document est supprimé alors qu'une génération
+        # est encore enregistrée comme active, on libère son
+        # verrou.
+        # ----------------------------------------------------
+
+        with generation_lock:
+
+            generation_in_progress.discard(
+                filename
+            )
 
         return {
             "message": (
