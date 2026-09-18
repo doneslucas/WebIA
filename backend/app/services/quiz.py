@@ -5,7 +5,10 @@ from typing import Callable
 
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 
+from app.services.task_manager import task_manager
+
 from app.database.connection import get_connection
+
 from app.services.chroma import collection
 
 
@@ -24,6 +27,7 @@ QUIZ_NUM_PREDICT = 1000
 embeddings = OllamaEmbeddings(
     model="nomic-embed-text"
 )
+
 
 llm = OllamaLLM(
     model="llama3.2:latest",
@@ -903,7 +907,8 @@ def generate_questions_for_bank(
     document: str,
     difficulty: str,
     target_count: int,
-    progress_callback: Callable[[int], None] | None = None
+    progress_callback: Callable[[int], None] | None = None,
+    background: bool = True
 ):
     """
     Génère progressivement la banque d'une difficulté.
@@ -920,6 +925,14 @@ def generate_questions_for_bank(
 
     progress_callback est appelé après chaque progression
     réelle de la banque.
+
+    background=True :
+        La fonction est utilisée par la génération automatique.
+        Elle respecte donc la priorité du chatbot et du quiz.
+
+    background=False :
+        La fonction est appelée directement pour répondre
+        à une demande utilisateur.
     """
 
     generated_count = count_questions(
@@ -994,6 +1007,35 @@ def generate_questions_for_bank(
                         difficulty
                     )
                 )
+
+                # ------------------------------------------------
+                # PRIORITÉ
+                #
+                # La génération automatique est une tâche
+                # de priorité 3.
+                #
+                # On attend juste avant l'appel au LLM.
+                #
+                # Ainsi, lorsqu'un chatbot ou un quiz utilisateur
+                # devient actif, la génération automatique ne lance
+                # pas de nouvel appel Ollama.
+                # ------------------------------------------------
+
+                if background:
+
+                    print(
+                        f"[{difficulty.upper()}] "
+                        f"Vérification des priorités avant "
+                        f"génération du chunk {chunk_id}..."
+                    )
+
+                    task_manager.wait_for_background_permission()
+
+                    print(
+                        f"[{difficulty.upper()}] "
+                        f"Aucune requête prioritaire active. "
+                        f"Génération du chunk {chunk_id}."
+                    )
 
                 questions = generate_quiz_batch(
                     context=context,
@@ -1252,74 +1294,93 @@ def generate_quiz(
     difficulty: str,
     user_id: int
 ):
-    if question_count not in {
-        5,
-        10,
-        15,
-        20
-    }:
+    """
+    Génère/récupère un quiz demandé directement
+    par un utilisateur.
 
-        raise ValueError(
-            "Le nombre de questions doit être 5, 10, 15 ou 20."
+    Cette fonction est une tâche de priorité 1.
+
+    Pendant toute sa durée, la génération automatique
+    de priorité 3 est mise en pause.
+    """
+
+    task_manager.start_user_request()
+
+    try:
+
+        if question_count not in {
+            5,
+            10,
+            15,
+            20
+        }:
+
+            raise ValueError(
+                "Le nombre de questions doit être 5, 10, 15 ou 20."
+            )
+
+        if difficulty not in {
+            "easy",
+            "medium",
+            "hard"
+        }:
+
+            raise ValueError(
+                "La difficulté doit être easy, medium ou hard."
+            )
+
+        max_capacity = get_max_capacity(
+            document
         )
 
-    if difficulty not in {
-        "easy",
-        "medium",
-        "hard"
-    }:
+        if max_capacity == 0:
 
-        raise ValueError(
-            "La difficulté doit être easy, medium ou hard."
+            raise ValueError(
+                "Aucun chunk disponible pour ce document."
+            )
+
+        current_count = count_questions(
+            document,
+            difficulty
         )
 
-    max_capacity = get_max_capacity(
-        document
-    )
-
-    if max_capacity == 0:
-
-        raise ValueError(
-            "Aucun chunk disponible pour ce document."
+        target_bank_size = min(
+            TARGET_QUESTION_COUNT,
+            max_capacity
         )
 
-    current_count = count_questions(
-        document,
-        difficulty
-    )
+        if current_count < target_bank_size:
 
-    target_bank_size = min(
-        TARGET_QUESTION_COUNT,
-        max_capacity
-    )
+            print(
+                f"Banque {difficulty} : "
+                f"{current_count}/{target_bank_size} questions."
+            )
 
-    if current_count < target_bank_size:
+            generate_questions_for_bank(
+                document=document,
+                difficulty=difficulty,
+                target_count=target_bank_size,
+                background=False
+            )
 
-        print(
-            f"Banque {difficulty} : "
-            f"{current_count}/{target_bank_size} questions."
-        )
-
-        generate_questions_for_bank(
+        questions = get_random_questions(
             document=document,
             difficulty=difficulty,
-            target_count=target_bank_size
+            question_count=question_count,
+            user_id=user_id
         )
 
-    questions = get_random_questions(
-        document=document,
-        difficulty=difficulty,
-        question_count=question_count,
-        user_id=user_id
-    )
+        if len(questions) < question_count:
 
-    if len(questions) < question_count:
+            raise ValueError(
+                "Pas assez de questions non vues disponibles "
+                "pour cet utilisateur."
+            )
 
-        raise ValueError(
-            "Pas assez de questions non vues disponibles "
-            "pour cet utilisateur."
-        )
+        return {
+            "questions": questions
+        }
 
-    return {
-        "questions": questions
-    }
+    finally:
+
+        task_manager.end_user_request()

@@ -20,6 +20,8 @@ from app.services.quiz import (
     count_questions
 )
 
+from app.services.task_manager import task_manager
+
 
 DOCUMENTS_DIR = "documents"
 
@@ -46,54 +48,104 @@ embeddings_model = OllamaEmbeddings(
 
 
 # ============================================================
-# PROGRESSION DES GÉNÉRATIONS
+# PROGRESSION
 # ============================================================
 
 generation_progress = {}
 
 
-def get_generation_progress(
-    filename: str
-):
-    """
-    Retourne la progression actuelle de la génération
-    des questions pour un document.
-    """
+def get_default_difficulty_progress():
+    return {
+        "status": "pending",
+        "current": 0,
+        "target": QUESTION_BANK_TARGET,
+        "progress": 0
+    }
 
-    progress = generation_progress.get(
-        filename
-    )
+
+def get_default_indexing_progress():
+    return {
+        "status": "not_started",
+        "progress": 0,
+        "stage": "waiting",
+        "details": ""
+    }
+
+
+def get_generation_progress(filename: str):
+    progress = generation_progress.get(filename)
 
     if progress is None:
-
         return {
             "document": filename,
             "status": "not_started",
+
+            "indexing": get_default_indexing_progress(),
+
+            "indexing_progress": 0,
+
             "global_progress": 0,
 
-            "easy": {
-                "status": "pending",
-                "current": 0,
-                "target": QUESTION_BANK_TARGET,
-                "progress": 0
-            },
-
-            "medium": {
-                "status": "pending",
-                "current": 0,
-                "target": QUESTION_BANK_TARGET,
-                "progress": 0
-            },
-
-            "hard": {
-                "status": "pending",
-                "current": 0,
-                "target": QUESTION_BANK_TARGET,
-                "progress": 0
-            }
+            "easy": get_default_difficulty_progress(),
+            "medium": get_default_difficulty_progress(),
+            "hard": get_default_difficulty_progress()
         }
 
     return progress
+
+
+def initialize_progress(filename: str):
+    generation_progress[filename] = {
+        "document": filename,
+        "status": "indexing",
+
+        "indexing": {
+            "status": "indexing",
+            "progress": 0,
+            "stage": "starting",
+            "details": "Préparation de l'import du document..."
+        },
+
+        "indexing_progress": 0,
+
+        "global_progress": 0,
+
+        "easy": get_default_difficulty_progress(),
+        "medium": get_default_difficulty_progress(),
+        "hard": get_default_difficulty_progress()
+    }
+
+
+def update_indexing_progress(
+    filename: str,
+    progress: int,
+    status: str = "indexing",
+    stage: str = "",
+    details: str = ""
+):
+    if filename not in generation_progress:
+        initialize_progress(filename)
+
+    progress = max(
+        0,
+        min(
+            100,
+            int(progress)
+        )
+    )
+
+    generation_progress[filename][
+        "indexing"
+    ] = {
+        "status": status,
+        "progress": progress,
+        "stage": stage,
+        "details": details
+    }
+
+    generation_progress[filename][
+        "indexing_progress"
+    ] = progress
 
 
 def update_generation_progress(
@@ -103,26 +155,14 @@ def update_generation_progress(
     target: int,
     status: str
 ):
-    """
-    Met à jour la progression d'une difficulté.
-    """
-
     if filename not in generation_progress:
+        initialize_progress(filename)
 
-        generation_progress[filename] = {
-            "document": filename,
-            "status": "generating",
-            "global_progress": 0
-        }
-
-    progress = generation_progress[
-        filename
-    ]
+    progress = generation_progress[filename]
 
     percentage = 0
 
     if target > 0:
-
         percentage = min(
             100,
             int(
@@ -161,37 +201,57 @@ def update_generation_progress(
         / len(difficulties)
     )
 
-    progress["global_progress"] = (
-        global_progress
-    )
+    progress["global_progress"] = global_progress
 
 
 def initialize_generation_progress(
     filename: str
 ):
-    """
-    Initialise la progression avant de commencer
-    la génération des trois banques.
-    """
+    if filename not in generation_progress:
+        generation_progress[filename] = {
+            "document": filename,
+            "status": "generating",
 
-    generation_progress[
-        filename
-    ] = {
-        "document": filename,
-        "status": "generating",
-        "global_progress": 0
+            "indexing": {
+                "status": "completed",
+                "progress": 100,
+                "stage": "completed",
+                "details": "Indexation du document terminée."
+            },
+
+            "indexing_progress": 100,
+
+            "global_progress": 0,
+
+            "easy": get_default_difficulty_progress(),
+            "medium": get_default_difficulty_progress(),
+            "hard": get_default_difficulty_progress()
+        }
+
+        return
+
+    progress = generation_progress[filename]
+
+    progress["status"] = "generating"
+
+    progress["indexing"] = {
+        "status": "completed",
+        "progress": 100,
+        "stage": "completed",
+        "details": "Indexation du document terminée."
     }
 
-    for difficulty in QUIZ_DIFFICULTIES:
+    progress["indexing_progress"] = 100
 
-        generation_progress[
-            filename
-        ][difficulty] = {
+    for difficulty in QUIZ_DIFFICULTIES:
+        progress[difficulty] = {
             "status": "pending",
             "current": 0,
             "target": QUESTION_BANK_TARGET,
             "progress": 0
         }
+
+    progress["global_progress"] = 0
 
 
 # ============================================================
@@ -201,20 +261,6 @@ def initialize_generation_progress(
 def generate_document_question_banks(
     filename: str
 ):
-    """
-    Génère les trois banques de questions
-    en arrière-plan.
-
-    Une banque est indépendante des autres.
-
-    Si une banque contient déjà 50 questions,
-    generate_questions_for_bank() ne génère rien
-    pour cette difficulté.
-
-    Si une banque est incomplète, seules les questions
-    manquantes sont générées.
-    """
-
     initialize_generation_progress(
         filename
     )
@@ -227,10 +273,6 @@ def generate_document_question_banks(
                 filename,
                 difficulty
             )
-
-            # ------------------------------------------------
-            # Banque déjà complète
-            # ------------------------------------------------
 
             if current_before_generation >= QUESTION_BANK_TARGET:
 
@@ -252,10 +294,6 @@ def generate_document_question_banks(
 
                 continue
 
-            # ------------------------------------------------
-            # Banque incomplète
-            # ------------------------------------------------
-
             update_generation_progress(
                 filename=filename,
                 difficulty=difficulty,
@@ -276,6 +314,21 @@ def generate_document_question_banks(
                         target=QUESTION_BANK_TARGET,
                         status="generating"
                     )
+
+                print(
+                    f"[Indexer] "
+                    f"Vérification des priorités avant génération "
+                    f"{difficulty} pour {filename}..."
+                )
+
+                task_manager.wait_for_background_permission()
+
+                print(
+                    f"[Indexer] "
+                    f"Aucune priorité supérieure active. "
+                    f"Démarrage génération {difficulty} "
+                    f"pour {filename}."
+                )
 
                 generate_questions_for_bank(
                     document=filename,
@@ -306,14 +359,12 @@ def generate_document_question_banks(
                 )
 
                 try:
-
                     current_count = count_questions(
                         filename,
                         difficulty
                     )
 
                 except Exception:
-
                     current_count = 0
 
                 update_generation_progress(
@@ -368,9 +419,10 @@ def generate_document_question_banks(
             f"Erreur générale pour {filename} : {error}"
         )
 
-        generation_progress[
-            filename
-        ]["status"] = "error"
+        if filename in generation_progress:
+            generation_progress[
+                filename
+            ]["status"] = "error"
 
 
 # ============================================================
@@ -378,10 +430,6 @@ def generate_document_question_banks(
 # ============================================================
 
 def get_all_documents():
-    """
-    Retourne tous les documents enregistrés en base.
-    """
-
     connection = get_connection()
 
     try:
@@ -422,7 +470,6 @@ def get_all_documents():
             return documents
 
     finally:
-
         connection.close()
 
 
@@ -430,10 +477,6 @@ def delete_document(
     file_name: str,
     documents_dir: str = DOCUMENTS_DIR
 ):
-    """
-    Supprime complètement un document.
-    """
-
     file_name = Path(
         file_name
     ).name
@@ -469,16 +512,6 @@ def delete_document(
 
             document_id = document[0]
 
-            # ------------------------------------------------
-            # Suppression des chunks
-            #
-            # Les quiz_questions associés sont supprimés
-            # automatiquement grâce à ON DELETE CASCADE.
-            #
-            # Les quiz_attempt_questions associés sont ensuite
-            # supprimés automatiquement eux aussi.
-            # ------------------------------------------------
-
             cursor.execute(
                 """
                 DELETE FROM document_chunks
@@ -486,10 +519,6 @@ def delete_document(
                 """,
                 (document_id,)
             )
-
-            # ------------------------------------------------
-            # Suppression du document
-            # ------------------------------------------------
 
             cursor.execute(
                 """
@@ -500,10 +529,6 @@ def delete_document(
             )
 
             connection.commit()
-
-        # ----------------------------------------------------
-        # Suppression ChromaDB
-        # ----------------------------------------------------
 
         chroma_deleted = 0
 
@@ -521,10 +546,6 @@ def delete_document(
                 f"pour {file_name} : {error}"
             )
 
-        # ----------------------------------------------------
-        # Suppression du PDF
-        # ----------------------------------------------------
-
         file_deleted = False
 
         if document_path.exists():
@@ -532,10 +553,6 @@ def delete_document(
             document_path.unlink()
 
             file_deleted = True
-
-        # ----------------------------------------------------
-        # Suppression de la progression
-        # ----------------------------------------------------
 
         generation_progress.pop(
             file_name,
@@ -566,13 +583,6 @@ def delete_document(
 def calculate_file_hash(
     file_path: str
 ):
-    """
-    Calcule le SHA-256 du fichier PDF.
-
-    Le hash permet de déterminer si un PDF déjà enregistré
-    possède exactement le même contenu que celui importé.
-    """
-
     sha256 = hashlib.sha256()
 
     with open(
@@ -595,15 +605,6 @@ def calculate_file_hash(
 def get_existing_document(
     filename: str
 ):
-    """
-    Recherche un document existant en base.
-
-    Retourne :
-        (document_id, file_hash, chunk_count)
-
-    ou None si le document n'existe pas.
-    """
-
     connection = get_connection()
 
     try:
@@ -637,30 +638,6 @@ def index_pdf(
     file_path: str,
     filename: str | None = None
 ):
-    """
-    Indexe un PDF.
-
-    Comportement :
-
-    1. calcul du hash du PDF
-    2. vérification de l'existence du document
-    3. si le document existe avec le même hash :
-       - aucune réindexation
-       - aucun chunk supprimé
-       - aucune question supprimée
-       - aucune génération déclenchée ici
-    4. si le document est nouveau ou modifié :
-       - lecture du PDF
-       - découpage en chunks
-       - génération des embeddings par lots
-       - remplacement de l'index ChromaDB si nécessaire
-       - remplacement des anciens chunks PostgreSQL
-       - création des nouveaux chunks
-    5. la génération des banques de questions
-       est lancée séparément en arrière-plan
-       depuis la route documents.py.
-    """
-
     if filename is None:
 
         filename = Path(
@@ -676,435 +653,531 @@ def index_pdf(
         f"Début de l'import : {filename}"
     )
 
-    # --------------------------------------------------------
-    # Hash du fichier
-    #
-    # IMPORTANT :
-    # On calcule le hash AVANT toute réindexation.
-    # Cela permet de sortir immédiatement si le PDF
-    # est déjà présent et strictement identique.
-    # --------------------------------------------------------
-
-    file_hash = calculate_file_hash(
-        file_path
-    )
-
-    print(
-        f"[Indexer] "
-        f"Hash SHA-256 calculé pour {filename} : "
-        f"{file_hash}"
-    )
-
-    # --------------------------------------------------------
-    # Vérification d'un document existant
-    # --------------------------------------------------------
-
-    existing_document = get_existing_document(
+    initialize_progress(
         filename
     )
 
-    if existing_document is not None:
+    update_indexing_progress(
+        filename=filename,
+        progress=5,
+        status="indexing",
+        stage="hash",
+        details="Calcul du hash SHA-256..."
+    )
 
-        existing_document_id = existing_document[0]
-        existing_file_hash = existing_document[1]
-        existing_chunk_count = existing_document[2]
+    try:
 
-        # ----------------------------------------------------
-        # Même PDF déjà indexé
-        # ----------------------------------------------------
+        file_hash = calculate_file_hash(
+            file_path
+        )
 
-        if existing_file_hash == file_hash:
+        print(
+            f"[Indexer] "
+            f"Hash SHA-256 calculé pour {filename} : "
+            f"{file_hash}"
+        )
+
+        update_indexing_progress(
+            filename=filename,
+            progress=10,
+            status="indexing",
+            stage="verification",
+            details="Vérification du document existant..."
+        )
+
+        existing_document = get_existing_document(
+            filename
+        )
+
+        if existing_document is not None:
+
+            existing_document_id = existing_document[0]
+            existing_file_hash = existing_document[1]
+            existing_chunk_count = existing_document[2]
+
+            if existing_file_hash == file_hash:
+
+                print(
+                    f"[Indexer] "
+                    f"Le document {filename} existe déjà "
+                    f"avec le même contenu."
+                )
+
+                update_indexing_progress(
+                    filename=filename,
+                    progress=100,
+                    status="completed",
+                    stage="completed",
+                    details=(
+                        f"Document déjà indexé. "
+                        f"{existing_chunk_count} chunks conservés."
+                    )
+                )
+
+                generation_progress[
+                    filename
+                ]["status"] = "generating"
+
+                print(
+                    f"[Indexer] "
+                    f"Aucune réindexation nécessaire."
+                )
+
+                return {
+                    "filename": filename,
+                    "file": filename,
+                    "chunk_count": existing_chunk_count,
+                    "document_id": existing_document_id,
+                    "already_indexed": True,
+                    "content_changed": False
+                }
 
             print(
                 f"[Indexer] "
                 f"Le document {filename} existe déjà "
-                f"avec le même contenu."
+                f"mais son contenu a changé."
+            )
+
+            content_changed = True
+
+        else:
+
+            print(
+                f"[Indexer] "
+                f"Nouveau document : {filename}"
+            )
+
+            content_changed = False
+
+        task_manager.start_pdf_operation()
+
+        try:
+
+            update_indexing_progress(
+                filename=filename,
+                progress=15,
+                status="indexing",
+                stage="pdf",
+                details="Lecture du PDF..."
+            )
+
+            documents = load_pdf(
+                file_path
+            )
+
+            update_indexing_progress(
+                filename=filename,
+                progress=20,
+                status="indexing",
+                stage="chunks",
+                details="Découpage du document en chunks..."
+            )
+
+            chunks = split_documents(
+                documents
             )
 
             print(
                 f"[Indexer] "
-                f"Aucune réindexation nécessaire."
+                f"{len(chunks)} chunks générés "
+                f"pour {filename}"
+            )
+
+            if not chunks:
+
+                raise ValueError(
+                    "Aucun chunk n'a été généré à partir du PDF."
+                )
+
+            texts = [
+                chunk.page_content
+                for chunk in chunks
+            ]
+
+            vectors = []
+
+            total_texts = len(texts)
+
+            update_indexing_progress(
+                filename=filename,
+                progress=25,
+                status="indexing",
+                stage="embeddings",
+                details=(
+                    f"Préparation des embeddings : "
+                    f"0/{total_texts}"
+                )
             )
 
             print(
                 f"[Indexer] "
-                f"Chunks conservés : "
-                f"{existing_chunk_count}"
+                f"Génération des embeddings "
+                f"pour {filename}..."
+            )
+
+            for batch_start in range(
+                0,
+                total_texts,
+                EMBEDDING_BATCH_SIZE
+            ):
+
+                task_manager.wait_for_pdf_permission()
+
+                batch_end = min(
+                    batch_start + EMBEDDING_BATCH_SIZE,
+                    total_texts
+                )
+
+                batch_texts = texts[
+                    batch_start:batch_end
+                ]
+
+                print(
+                    f"[Indexer] "
+                    f"Embeddings : "
+                    f"{batch_start + 1}-{batch_end}/"
+                    f"{total_texts}"
+                )
+
+                batch_vectors = (
+                    embeddings_model.embed_documents(
+                        batch_texts
+                    )
+                )
+
+                if not batch_vectors:
+
+                    raise ValueError(
+                        f"Aucun embedding généré "
+                        f"pour le lot "
+                        f"{batch_start + 1}-{batch_end}."
+                    )
+
+                if len(batch_vectors) != len(
+                    batch_texts
+                ):
+
+                    raise ValueError(
+                        "Le nombre d'embeddings du lot "
+                        "ne correspond pas au nombre de "
+                        "textes envoyés."
+                    )
+
+                vectors.extend(
+                    batch_vectors
+                )
+
+                embedding_progress = 25
+
+                if total_texts > 0:
+
+                    embedding_progress = (
+                        25
+                        + int(
+                            (
+                                batch_end
+                                / total_texts
+                            )
+                            * 45
+                        )
+                    )
+
+                update_indexing_progress(
+                    filename=filename,
+                    progress=min(
+                        70,
+                        embedding_progress
+                    ),
+                    status="indexing",
+                    stage="embeddings",
+                    details=(
+                        f"Embeddings : "
+                        f"{batch_end}/{total_texts}"
+                    )
+                )
+
+            if not vectors:
+
+                raise ValueError(
+                    "Aucun embedding n'a été généré."
+                )
+
+            if len(vectors) != len(chunks):
+
+                raise ValueError(
+                    "Le nombre total d'embeddings "
+                    "ne correspond pas au nombre de chunks."
+                )
+
+            print(
+                f"[Indexer] "
+                f"{len(vectors)} embeddings générés "
+                f"pour {filename}"
+            )
+
+            update_indexing_progress(
+                filename=filename,
+                progress=70,
+                status="indexing",
+                stage="chroma",
+                details="Préparation de ChromaDB..."
+            )
+
+            task_manager.wait_for_pdf_permission()
+
+            if content_changed:
+
+                print(
+                    f"[Indexer] "
+                    f"Suppression de l'ancien index ChromaDB "
+                    f"pour {filename}..."
+                )
+
+                try:
+
+                    chroma_deleted = delete_file(
+                        filename
+                    )
+
+                    print(
+                        f"[Indexer] "
+                        f"{chroma_deleted} anciens chunks "
+                        f"supprimés de ChromaDB."
+                    )
+
+                except Exception as error:
+
+                    print(
+                        f"[Indexer] "
+                        f"Erreur suppression ancien index "
+                        f"ChromaDB pour {filename} : {error}"
+                    )
+
+                    raise
+
+            task_manager.wait_for_pdf_permission()
+
+            add_chunks(
+                chunks=chunks,
+                vectors=vectors,
+                file_name=filename
+            )
+
+            print(
+                f"[Indexer] "
+                f"Indexation ChromaDB terminée : {filename}"
+            )
+
+            update_indexing_progress(
+                filename=filename,
+                progress=85,
+                status="indexing",
+                stage="postgresql",
+                details="Enregistrement du document en base..."
+            )
+
+            task_manager.wait_for_pdf_permission()
+
+            connection = get_connection()
+
+            try:
+
+                with connection.cursor() as cursor:
+
+                    cursor.execute(
+                        """
+                        SELECT id
+                        FROM documents
+                        WHERE file_name = %s
+                        """,
+                        (filename,)
+                    )
+
+                    existing_document = (
+                        cursor.fetchone()
+                    )
+
+                    if existing_document is not None:
+
+                        document_id = (
+                            existing_document[0]
+                        )
+
+                        print(
+                            f"[Indexer] "
+                            f"Remplacement des anciens chunks "
+                            f"du document id={document_id}..."
+                        )
+
+                        cursor.execute(
+                            """
+                            DELETE FROM document_chunks
+                            WHERE document_id = %s
+                            """,
+                            (document_id,)
+                        )
+
+                        cursor.execute(
+                            """
+                            UPDATE documents
+                            SET
+                                file_hash = %s,
+                                chunk_count = %s,
+                                created_at = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                            """,
+                            (
+                                file_hash,
+                                len(chunks),
+                                document_id
+                            )
+                        )
+
+                    else:
+
+                        cursor.execute(
+                            """
+                            INSERT INTO documents (
+                                file_name,
+                                file_hash,
+                                chunk_count
+                            )
+                            VALUES (
+                                %s,
+                                %s,
+                                %s
+                            )
+                            RETURNING id
+                            """,
+                            (
+                                filename,
+                                file_hash,
+                                len(chunks)
+                            )
+                        )
+
+                        document_id = (
+                            cursor.fetchone()[0]
+                        )
+
+                    for chunk_index in range(
+                        len(chunks)
+                    ):
+
+                        chroma_id = (
+                            f"{filename}_chunk_{chunk_index}"
+                        )
+
+                        cursor.execute(
+                            """
+                            INSERT INTO document_chunks (
+                                document_id,
+                                chunk_index,
+                                chroma_id,
+                                question_count,
+                                question_limit
+                            )
+                            VALUES (
+                                %s,
+                                %s,
+                                %s,
+                                %s,
+                                %s
+                            )
+                            """,
+                            (
+                                document_id,
+                                chunk_index,
+                                chroma_id,
+                                0,
+                                QUESTION_LIMIT_PER_CHUNK
+                            )
+                        )
+
+                    connection.commit()
+
+            except Exception:
+
+                connection.rollback()
+
+                raise
+
+            finally:
+
+                connection.close()
+
+            update_indexing_progress(
+                filename=filename,
+                progress=100,
+                status="completed",
+                stage="completed",
+                details=(
+                    f"Indexation terminée : "
+                    f"{len(chunks)} chunks enregistrés."
+                )
+            )
+
+            generation_progress[
+                filename
+            ]["status"] = "generating"
+
+            print(
+                f"[Indexer] "
+                f"Document enregistré en base : "
+                f"id={document_id}"
+            )
+
+            print(
+                f"[Indexer] "
+                f"{len(chunks)} chunks enregistrés dans "
+                f"document_chunks pour {filename}"
+            )
+
+            print(
+                f"[Indexer] "
+                f"Indexation terminée : {filename}"
             )
 
             return {
                 "filename": filename,
-                "chunk_count": existing_chunk_count,
-                "document_id": existing_document_id,
-                "already_indexed": True,
-                "content_changed": False
+                "file": filename,
+                "chunk_count": len(chunks),
+                "document_id": document_id,
+                "already_indexed": False,
+                "content_changed": content_changed
             }
 
-        # ----------------------------------------------------
-        # Même nom mais contenu différent
-        # ----------------------------------------------------
+        finally:
+
+            task_manager.end_pdf_operation()
+
+    except Exception as error:
 
         print(
             f"[Indexer] "
-            f"Le document {filename} existe déjà "
-            f"mais son contenu a changé."
+            f"Erreur indexation {filename} : {error}"
         )
 
-        print(
-            f"[Indexer] "
-            f"Une nouvelle indexation va être effectuée."
-        )
-
-        content_changed = True
-
-    else:
-
-        print(
-            f"[Indexer] "
-            f"Nouveau document : {filename}"
-        )
-
-        content_changed = False
-
-    # --------------------------------------------------------
-    # Lecture du PDF
-    # --------------------------------------------------------
-
-    documents = load_pdf(
-        file_path
-    )
-
-    # --------------------------------------------------------
-    # Découpage
-    # --------------------------------------------------------
-
-    chunks = split_documents(
-        documents
-    )
-
-    print(
-        f"[Indexer] "
-        f"{len(chunks)} chunks générés "
-        f"pour {filename}"
-    )
-
-    if not chunks:
-
-        raise ValueError(
-            "Aucun chunk n'a été généré à partir du PDF."
-        )
-
-    # --------------------------------------------------------
-    # Embeddings
-    # --------------------------------------------------------
-
-    print(
-        f"[Indexer] "
-        f"Génération des embeddings "
-        f"pour {filename}..."
-    )
-
-    texts = [
-        chunk.page_content
-        for chunk in chunks
-    ]
-
-    vectors = []
-
-    total_texts = len(texts)
-
-    for batch_start in range(
-        0,
-        total_texts,
-        EMBEDDING_BATCH_SIZE
-    ):
-
-        batch_end = min(
-            batch_start + EMBEDDING_BATCH_SIZE,
-            total_texts
-        )
-
-        batch_texts = texts[
-            batch_start:batch_end
-        ]
-
-        print(
-            f"[Indexer] "
-            f"Embeddings : "
-            f"{batch_start + 1}-{batch_end}/"
-            f"{total_texts}"
-        )
-
-        batch_vectors = (
-            embeddings_model.embed_documents(
-                batch_texts
-            )
-        )
-
-        if not batch_vectors:
-
-            raise ValueError(
-                f"Aucun embedding généré "
-                f"pour le lot "
-                f"{batch_start + 1}-{batch_end}."
-            )
-
-        if len(batch_vectors) != len(
-            batch_texts
-        ):
-
-            raise ValueError(
-                "Le nombre d'embeddings du lot "
-                "ne correspond pas au nombre de "
-                "textes envoyés."
-            )
-
-        vectors.extend(
-            batch_vectors
-        )
-
-    if not vectors:
-
-        raise ValueError(
-            "Aucun embedding n'a été généré."
-        )
-
-    if len(vectors) != len(chunks):
-
-        raise ValueError(
-            "Le nombre total d'embeddings "
-            "ne correspond pas au nombre de chunks."
-        )
-
-    print(
-        f"[Indexer] "
-        f"{len(vectors)} embeddings générés "
-        f"pour {filename}"
-    )
-
-    # --------------------------------------------------------
-    # ChromaDB
-    #
-    # Si le document existait avec un contenu différent,
-    # les anciens vecteurs doivent être supprimés avant
-    # d'ajouter les nouveaux vecteurs ayant les mêmes IDs.
-    # --------------------------------------------------------
-
-    if content_changed:
-
-        print(
-            f"[Indexer] "
-            f"Suppression de l'ancien index ChromaDB "
-            f"pour {filename}..."
-        )
-
-        try:
-
-            chroma_deleted = delete_file(
+        if filename not in generation_progress:
+            initialize_progress(
                 filename
             )
 
-            print(
-                f"[Indexer] "
-                f"{chroma_deleted} anciens chunks "
-                f"supprimés de ChromaDB."
-            )
+        update_indexing_progress(
+            filename=filename,
+            progress=generation_progress[
+                filename
+            ].get(
+                "indexing_progress",
+                0
+            ),
+            status="error",
+            stage="error",
+            details=str(error)
+        )
 
-        except Exception as error:
-
-            print(
-                f"[Indexer] "
-                f"Erreur suppression ancien index "
-                f"ChromaDB pour {filename} : {error}"
-            )
-
-            raise
-
-    add_chunks(
-        chunks=chunks,
-        vectors=vectors,
-        file_name=filename
-    )
-
-    print(
-        f"[Indexer] "
-        f"Indexation ChromaDB terminée : {filename}"
-    )
-
-    # --------------------------------------------------------
-    # PostgreSQL
-    # --------------------------------------------------------
-
-    connection = get_connection()
-
-    try:
-
-        with connection.cursor() as cursor:
-
-            # ------------------------------------------------
-            # Vérification document existant
-            # ------------------------------------------------
-
-            cursor.execute(
-                """
-                SELECT id
-                FROM documents
-                WHERE file_name = %s
-                """,
-                (filename,)
-            )
-
-            existing_document = (
-                cursor.fetchone()
-            )
-
-            # ------------------------------------------------
-            # Document existant :
-            # remplacement de son contenu
-            #
-            # La suppression des chunks supprime également
-            # automatiquement les anciennes questions grâce
-            # aux contraintes ON DELETE CASCADE.
-            # ------------------------------------------------
-
-            if existing_document is not None:
-
-                document_id = (
-                    existing_document[0]
-                )
-
-                print(
-                    f"[Indexer] "
-                    f"Remplacement des anciens chunks "
-                    f"du document id={document_id}..."
-                )
-
-                cursor.execute(
-                    """
-                    DELETE FROM document_chunks
-                    WHERE document_id = %s
-                    """,
-                    (document_id,)
-                )
-
-                cursor.execute(
-                    """
-                    UPDATE documents
-                    SET
-                        file_hash = %s,
-                        chunk_count = %s,
-                        created_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                    """,
-                    (
-                        file_hash,
-                        len(chunks),
-                        document_id
-                    )
-                )
-
-            # ------------------------------------------------
-            # Nouveau document
-            # ------------------------------------------------
-
-            else:
-
-                cursor.execute(
-                    """
-                    INSERT INTO documents (
-                        file_name,
-                        file_hash,
-                        chunk_count
-                    )
-                    VALUES (
-                        %s,
-                        %s,
-                        %s
-                    )
-                    RETURNING id
-                    """,
-                    (
-                        filename,
-                        file_hash,
-                        len(chunks)
-                    )
-                )
-
-                document_id = (
-                    cursor.fetchone()[0]
-                )
-
-            # ------------------------------------------------
-            # Enregistrement des chunks
-            # ------------------------------------------------
-
-            for chunk_index in range(
-                len(chunks)
-            ):
-
-                chroma_id = (
-                    f"{filename}_chunk_{chunk_index}"
-                )
-
-                cursor.execute(
-                    """
-                    INSERT INTO document_chunks (
-                        document_id,
-                        chunk_index,
-                        chroma_id,
-                        question_count,
-                        question_limit
-                    )
-                    VALUES (
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s
-                    )
-                    """,
-                    (
-                        document_id,
-                        chunk_index,
-                        chroma_id,
-                        0,
-                        QUESTION_LIMIT_PER_CHUNK
-                    )
-                )
-
-            connection.commit()
-
-    except Exception:
-
-        connection.rollback()
+        generation_progress[
+            filename
+        ]["status"] = "error"
 
         raise
-
-    finally:
-
-        connection.close()
-
-    print(
-        f"[Indexer] "
-        f"Document enregistré en base : "
-        f"id={document_id}"
-    )
-
-    print(
-        f"[Indexer] "
-        f"{len(chunks)} chunks enregistrés dans "
-        f"document_chunks pour {filename}"
-    )
-
-    print(
-        f"[Indexer] "
-        f"Indexation terminée : {filename}"
-    )
-
-    return {
-        "filename": filename,
-        "chunk_count": len(chunks),
-        "document_id": document_id,
-        "already_indexed": False,
-        "content_changed": content_changed
-    }

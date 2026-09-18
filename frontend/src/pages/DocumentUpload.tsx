@@ -35,10 +35,23 @@ type DifficultyProgress = {
 };
 
 
+type IndexingProgress = {
+  status: string;
+  progress: number;
+  stage: string;
+  details: string;
+};
+
+
 type GenerationProgress = {
   document: string;
   status: string;
+
+  indexing: IndexingProgress;
+  indexing_progress: number;
+
   global_progress: number;
+
   easy: DifficultyProgress;
   medium: DifficultyProgress;
   hard: DifficultyProgress;
@@ -168,6 +181,78 @@ function DocumentUpload() {
   }
 
 
+  function getStatusLabel(
+    status: string
+  ) {
+
+    switch (status) {
+
+      case "pending":
+        return "En attente";
+
+      case "indexing":
+        return "Indexation en cours";
+
+      case "generating":
+        return "Génération en cours";
+
+      case "completed":
+        return "Terminé";
+
+      case "error":
+        return "Erreur";
+
+      case "not_started":
+        return "Non démarré";
+
+      default:
+        return status;
+    }
+  }
+
+
+  function getIndexingStageLabel(
+    stage: string
+  ) {
+
+    switch (stage) {
+
+      case "starting":
+        return "Préparation";
+
+      case "hash":
+        return "Calcul du hash";
+
+      case "verification":
+        return "Vérification";
+
+      case "pdf":
+        return "Lecture du PDF";
+
+      case "chunks":
+        return "Découpage en chunks";
+
+      case "embeddings":
+        return "Génération des embeddings";
+
+      case "chroma":
+        return "Indexation ChromaDB";
+
+      case "postgresql":
+        return "Enregistrement PostgreSQL";
+
+      case "completed":
+        return "Indexation terminée";
+
+      case "error":
+        return "Erreur";
+
+      default:
+        return stage || "Traitement";
+    }
+  }
+
+
   async function checkGenerationProgress(
     filename: string
   ) {
@@ -215,7 +300,7 @@ function DocumentUpload() {
       ) {
 
         setMessage(
-          `${filename} : une erreur est survenue pendant la génération des questions.`
+          `${filename} : une erreur est survenue pendant le traitement.`
         );
 
         stopProgressPolling();
@@ -277,10 +362,13 @@ function DocumentUpload() {
       return;
     }
 
+    const filename =
+      file.name;
+
     setLoading(true);
 
     setMessage(
-      "Ajout du document en cours..."
+      `${filename} : préparation de l'import...`
     );
 
     setGenerationProgress(
@@ -291,6 +379,18 @@ function DocumentUpload() {
 
     try {
 
+      /*
+       * On démarre le polling AVANT l'upload.
+       *
+       * Le backend traite index_pdf() dans un thread séparé.
+       * Le endpoint /progress peut donc être interrogé
+       * pendant que l'indexation est encore en cours.
+       */
+
+      startProgressPolling(
+        filename
+      );
+
       const {
         response,
         data,
@@ -298,33 +398,46 @@ function DocumentUpload() {
 
       if (response.ok) {
 
-        const filename =
+        const returnedFilename =
           data.file ||
           data.filename ||
-          file.name;
+          filename;
+
+        if (
+          returnedFilename !== filename
+        ) {
+
+          stopProgressPolling();
+
+          startProgressPolling(
+            returnedFilename
+          );
+        }
 
         if (data.skipped) {
 
           setMessage(
-            `${filename} est déjà disponible. ` +
+            `${returnedFilename} est déjà disponible. ` +
             "Vérification de son contenu en cours..."
           );
 
         } else {
 
           setMessage(
-            `${filename} a été ajouté avec succès. ` +
+            `${returnedFilename} a été ajouté avec succès. ` +
             "La génération des questions commence..."
           );
         }
 
         await loadDocuments();
 
-        startProgressPolling(
-          filename
-        );
-
       } else {
+
+        stopProgressPolling();
+
+        setGenerationProgress(
+          null
+        );
 
         setMessage(
           data.detail ||
@@ -338,6 +451,8 @@ function DocumentUpload() {
         "Erreur lors de l'upload :",
         error
       );
+
+      stopProgressPolling();
 
       setMessage(
         "Impossible de communiquer avec le serveur."
@@ -488,33 +603,6 @@ function DocumentUpload() {
     } finally {
 
       setLoading(false);
-    }
-  }
-
-
-  function getStatusLabel(
-    status: string
-  ) {
-
-    switch (status) {
-
-      case "pending":
-        return "En attente";
-
-      case "generating":
-        return "Génération en cours";
-
-      case "completed":
-        return "Terminé";
-
-      case "error":
-        return "Erreur";
-
-      case "not_started":
-        return "Non démarré";
-
-      default:
-        return status;
     }
   }
 
@@ -677,7 +765,10 @@ function DocumentUpload() {
             <div>
 
               <h2>
-                Génération des questions
+                {generationProgress.indexing.status ===
+                "indexing"
+                  ? "Indexation du document"
+                  : "Traitement du document"}
               </h2>
 
               <p>
@@ -688,7 +779,13 @@ function DocumentUpload() {
 
             <div className="generation-global-value">
 
-              {generationProgress.global_progress}%
+              {generationProgress.indexing.status ===
+              "indexing"
+                ? generationProgress.indexing_progress
+                : generationProgress.status ===
+                  "completed"
+                ? 100
+                : generationProgress.global_progress}%
 
             </div>
 
@@ -701,46 +798,139 @@ function DocumentUpload() {
               className="generation-global-bar-fill"
               style={{
                 width:
-                  `${generationProgress.global_progress}%`,
+                  `${
+                    generationProgress.indexing.status ===
+                    "indexing"
+                      ? generationProgress.indexing_progress
+                      : generationProgress.status ===
+                        "completed"
+                      ? 100
+                      : generationProgress.global_progress
+                  }%`,
               }}
             />
 
           </div>
 
 
-          <div className="generation-global-status">
+          {generationProgress.indexing.status ===
+            "indexing" && (
 
-            <span>
-              État :
-            </span>
+            <div className="generation-global-status">
 
-            <strong>
-              {getStatusLabel(
-                generationProgress.status
+              <span>
+                Étape :
+              </span>
+
+              <strong>
+                {
+                  getIndexingStageLabel(
+                    generationProgress.indexing.stage
+                  )
+                }
+              </strong>
+
+              {generationProgress.indexing.details && (
+
+                <span>
+                  {" "}
+                  —{" "}
+                  {generationProgress.indexing.details}
+                </span>
+
               )}
-            </strong>
 
-          </div>
+            </div>
+
+          )}
 
 
-          <div className="generation-difficulties">
+          {generationProgress.indexing.status ===
+            "completed" &&
 
-            {renderDifficultyProgress(
-              "Facile",
-              generationProgress.easy
-            )}
+            generationProgress.status !==
+              "completed" && (
 
-            {renderDifficultyProgress(
-              "Moyen",
-              generationProgress.medium
-            )}
+            <div className="generation-global-status">
 
-            {renderDifficultyProgress(
-              "Difficile",
-              generationProgress.hard
-            )}
+              <span>
+                État :
+              </span>
 
-          </div>
+              <strong>
+                Génération des questions
+              </strong>
+
+            </div>
+
+          )}
+
+
+          {generationProgress.status ===
+            "completed" && (
+
+            <div className="generation-global-status">
+
+              <span>
+                État :
+              </span>
+
+              <strong>
+                Traitement terminé
+              </strong>
+
+            </div>
+
+          )}
+
+
+          {generationProgress.status ===
+            "error" && (
+
+            <div className="generation-global-status">
+
+              <span>
+                État :
+              </span>
+
+              <strong>
+                Une erreur est survenue
+              </strong>
+
+            </div>
+
+          )}
+
+
+          {generationProgress.indexing.status ===
+            "completed" &&
+
+            generationProgress.status !==
+              "completed" &&
+
+            generationProgress.status !==
+              "error" && (
+
+            <div className="generation-difficulties">
+
+              {renderDifficultyProgress(
+                "Facile",
+                generationProgress.easy
+              )}
+
+              {renderDifficultyProgress(
+                "Moyen",
+                generationProgress.medium
+              )}
+
+              {renderDifficultyProgress(
+                "Difficile",
+                generationProgress.hard
+              )}
+
+            </div>
+
+          )}
 
         </section>
 
