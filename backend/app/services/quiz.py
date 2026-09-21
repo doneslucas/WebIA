@@ -8,7 +8,7 @@ from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from app.services.task_manager import task_manager
 
 from app.database.connection import get_connection
-
+from threading import Lock
 from app.services.chroma import collection
 
 
@@ -23,6 +23,9 @@ MAX_EMPTY_PASSES = 3
 
 QUIZ_NUM_PREDICT = 1000
 
+generation_lock = Lock()
+
+active_generations = set()
 
 embeddings = OllamaEmbeddings(
     model="nomic-embed-text"

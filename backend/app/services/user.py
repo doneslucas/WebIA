@@ -27,9 +27,10 @@ def register_user(email: str, password: str):
                 conn.commit()
 
     except UniqueViolation:
-        return {
-            "message": "Cet email est déjà utilisé"
-        }
+        raise HTTPException(
+            status_code=409,
+            detail="Cette adresse e-mail est déjà utilisée."
+        )
 
     return {
         "message": "Utilisateur créé",

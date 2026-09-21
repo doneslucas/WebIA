@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,10 +10,31 @@ from app.routes.documents import router as documents_router
 from app.routes.progress import router as progress_router
 from app.routes.quiz import router as quiz_router
 
+from app.services.question_bank_manager import question_bank_manager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("[WebIA] Démarrage de l'application.")
+
+    question_bank_manager.start()
+
+    print("[WebIA] QuestionBankManager démarré.")
+
+    yield
+
+    print("[WebIA] Arrêt de l'application.")
+
+    question_bank_manager.stop()
+
+    print("[WebIA] QuestionBankManager arrêté.")
+
+
 app = FastAPI(
     title="WebIA",
     description="Plateforme de cybersécurité avec intelligence artificielle",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 
@@ -30,6 +53,7 @@ app.include_router(chat_router)
 app.include_router(documents_router)
 app.include_router(progress_router)
 app.include_router(quiz_router)
+
 
 @app.get("/")
 def root():
