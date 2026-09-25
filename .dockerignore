@@ -1,0 +1,55 @@
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Environnement virtuel Python
+backend/venv
+backend/.venv
+venv
+.venv
+
+# Variables et secrets
+.env
+.env.*
+!.env.example
+
+# ChromaDB local
+backend/chroma_db
+chroma_db
+
+# Fichiers temporaires
+*.log
+*.tmp
+*.temp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode
+.idea
+
+# Frontend
+frontend/node_modules
+frontend/dist
+
+# Backend
+backend/.pytest_cache
+backend/__pycache__
+
+# Docker
+docker-compose.override.yml
+
+# Documentation et fichiers inutiles au build
+*.md
+!README.md

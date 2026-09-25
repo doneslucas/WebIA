@@ -33,14 +33,14 @@ router = APIRouter(
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-DOCUMENTS_DIR = BASE_DIR / "documents"
+DOCUMENTS_DIR = (
+    BASE_DIR / "documents"
+)
 
-MAX_FILE_SIZE = 20 * 1024 * 1024
+MAX_FILE_SIZE = (
+    20 * 1024 * 1024
+)
 
-
-# ============================================================
-# GESTION DES GÉNÉRATIONS EN COURS
-# ============================================================
 
 generation_in_progress = set()
 
@@ -50,13 +50,13 @@ generation_lock = Lock()
 def verify_admin(
     payload: dict
 ):
-
     if payload.get("role") != "admin":
 
         raise HTTPException(
             status_code=403,
             detail=(
-                "Accès refusé. Seuls les administrateurs "
+                "Accès refusé. "
+                "Seuls les administrateurs "
                 "peuvent gérer les documents."
             )
         )
@@ -66,19 +66,15 @@ def generate_banks_in_background(
     filename: str
 ):
 
-    # --------------------------------------------------------
-    # Vérification atomique :
-    # une seule génération à la fois pour un même fichier.
-    # --------------------------------------------------------
-
     with generation_lock:
 
         if filename in generation_in_progress:
 
             print(
-                f"[Documents] "
-                f"Génération déjà en cours pour {filename}. "
-                f"Nouvelle génération ignorée."
+                "[Documents] "
+                f"Génération déjà en cours "
+                f"pour {filename}. "
+                "Nouvelle génération ignorée."
             )
 
             return
@@ -90,17 +86,10 @@ def generate_banks_in_background(
     try:
 
         print(
-            f"[Documents] "
-            f"Démarrage de la génération des banques "
-            f"pour {filename}"
+            "[Documents] "
+            f"Démarrage de la génération "
+            f"des banques pour {filename}"
         )
-
-        # ----------------------------------------------------
-        # PRIORITÉ 3
-        #
-        # generate_document_question_banks() utilise lui-même
-        # le TaskManager pour attendre les priorités 1 et 2.
-        # ----------------------------------------------------
 
         generate_document_question_banks(
             filename
@@ -109,7 +98,7 @@ def generate_banks_in_background(
     except Exception as error:
 
         print(
-            f"[Documents] "
+            "[Documents] "
             f"Erreur génération des banques "
             f"pour {filename} : {error}"
         )
@@ -123,8 +112,9 @@ def generate_banks_in_background(
             )
 
         print(
-            f"[Documents] "
-            f"Génération libérée pour {filename}"
+            "[Documents] "
+            f"Génération libérée pour "
+            f"{filename}"
         )
 
 
@@ -133,40 +123,56 @@ def list_documents(
     payload: dict = Depends(verify_token)
 ):
 
-    verify_admin(
-        payload
-    )
+    """
+    Liste des documents disponibles.
+
+    Tous les utilisateurs authentifiés
+    peuvent consulter cette liste afin
+    de pouvoir sélectionner un document
+    pour générer un quiz.
+
+    Cette route ne permet aucune modification
+    des documents.
+    """
 
     try:
 
         return {
-            "documents": get_all_documents()
+            "documents":
+                get_all_documents()
         }
 
     except Exception as error:
 
         print(
-            f"Erreur lors de la récupération "
+            "[Documents] "
+            "Erreur lors de la récupération "
             f"des documents : {error}"
         )
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "Impossible de récupérer les documents."
+                "Impossible de récupérer "
+                "les documents."
             )
         )
 
 
-@router.get("/{filename}/progress")
+@router.get(
+    "/{filename}/progress"
+)
 def document_progress(
     filename: str,
     payload: dict = Depends(verify_token)
 ):
 
-    verify_admin(
-        payload
-    )
+    """
+    Progression de génération des questions.
+
+    Cette information peut être consultée
+    par tout utilisateur authentifié.
+    """
 
     filename = Path(
         filename
@@ -179,7 +185,8 @@ def document_progress(
         raise HTTPException(
             status_code=400,
             detail=(
-                "Seuls les fichiers PDF sont acceptés."
+                "Seuls les fichiers PDF "
+                "sont acceptés."
             )
         )
 
@@ -192,9 +199,10 @@ def document_progress(
     except Exception as error:
 
         print(
-            f"Erreur lors de la récupération "
-            f"de la progression pour {filename} : "
-            f"{error}"
+            "[Documents] "
+            "Erreur lors de la récupération "
+            f"de la progression pour "
+            f"{filename} : {error}"
         )
 
         raise HTTPException(
@@ -206,16 +214,18 @@ def document_progress(
         )
 
 
-# ============================================================
-# UPLOAD D'UN PDF
-# ============================================================
-
 @router.post("/upload")
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     payload: dict = Depends(verify_token)
 ):
+
+    """
+    Upload d'un document.
+
+    Réservé aux administrateurs.
+    """
 
     verify_admin(
         payload
@@ -239,7 +249,8 @@ async def upload_document(
         raise HTTPException(
             status_code=400,
             detail=(
-                "Seuls les fichiers PDF sont acceptés."
+                "Seuls les fichiers PDF "
+                "sont acceptés."
             )
         )
 
@@ -282,22 +293,6 @@ async def upload_document(
                 content
             )
 
-        # ----------------------------------------------------
-        # PRIORITÉ 2
-        #
-        # index_pdf() gère lui-même :
-        #
-        # - start_pdf_operation()
-        # - wait_for_pdf_permission()
-        # - end_pdf_operation()
-        #
-        # On l'exécute dans un thread afin que cette opération
-        # lourde ne bloque pas la boucle asyncio de FastAPI.
-        #
-        # Cela permet notamment au chatbot / quiz de recevoir
-        # une requête pendant l'indexation.
-        # ----------------------------------------------------
-
         result = await run_in_threadpool(
             index_pdf,
             str(file_path)
@@ -307,15 +302,6 @@ async def upload_document(
             "RESULT =",
             result
         )
-
-        # ----------------------------------------------------
-        # Lancement de la génération des banques
-        #
-        # Cette opération est de PRIORITÉ 3.
-        #
-        # Elle attendra automatiquement les priorités 1 et 2
-        # grâce au TaskManager.
-        # ----------------------------------------------------
 
         with generation_lock:
 
@@ -327,10 +313,10 @@ async def upload_document(
         if generation_already_running:
 
             print(
-                f"[Documents] "
-                f"Une génération est déjà en cours "
-                f"pour {filename}. "
-                f"Aucune nouvelle tâche ajoutée."
+                "[Documents] "
+                f"Une génération est déjà "
+                f"en cours pour {filename}. "
+                "Aucune nouvelle tâche ajoutée."
             )
 
         else:
@@ -341,21 +327,25 @@ async def upload_document(
             )
 
             print(
-                f"[Documents] "
-                f"Génération des banques planifiée "
-                f"pour {filename}"
+                "[Documents] "
+                f"Génération des banques "
+                f"planifiée pour {filename}"
             )
 
         return {
             **result,
             "question_banks": {
-                "status": "generation_started",
+                "status":
+                    "generation_started",
+
                 "difficulties": [
                     "easy",
                     "medium",
                     "hard"
                 ],
-                "target_per_difficulty": 50
+
+                "target_per_difficulty":
+                    50
             }
         }
 
@@ -364,21 +354,25 @@ async def upload_document(
         raise HTTPException(
             status_code=500,
             detail=(
-                f"Erreur lors du traitement du PDF : "
-                f"{error}"
+                "Erreur lors du traitement "
+                f"du PDF : {error}"
             )
         )
 
 
-# ============================================================
-# SUPPRESSION D'UN PDF
-# ============================================================
-
-@router.delete("/{filename}")
+@router.delete(
+    "/{filename}"
+)
 def remove_document(
     filename: str,
     payload: dict = Depends(verify_token)
 ):
+
+    """
+    Suppression d'un document.
+
+    Réservée aux administrateurs.
+    """
 
     verify_admin(
         payload
@@ -395,23 +389,10 @@ def remove_document(
         raise HTTPException(
             status_code=400,
             detail=(
-                "Seuls les fichiers PDF peuvent "
-                "être supprimés."
+                "Seuls les fichiers PDF "
+                "peuvent être supprimés."
             )
         )
-
-    # --------------------------------------------------------
-    # PRIORITÉ 2
-    #
-    # La suppression modifie :
-    #
-    # - PostgreSQL
-    # - ChromaDB
-    # - le fichier physique
-    #
-    # Elle doit donc être considérée comme une opération
-    # PDF de priorité 2.
-    # --------------------------------------------------------
 
     task_manager.start_pdf_operation()
 
@@ -423,15 +404,6 @@ def remove_document(
                 DOCUMENTS_DIR
             )
         )
-
-        # ----------------------------------------------------
-        # Nettoyage du suivi de génération.
-        #
-        # ATTENTION :
-        # cela ne force pas l'arrêt d'une génération déjà
-        # lancée. La génération en cours possède ses propres
-        # protections contre les chunks supprimés.
-        # ----------------------------------------------------
 
         with generation_lock:
 
@@ -447,22 +419,22 @@ def remove_document(
         if generation_was_running:
 
             print(
-                f"[Documents] "
-                f"Document {filename} supprimé alors "
-                f"qu'une génération était encore enregistrée "
-                f"comme active."
+                "[Documents] "
+                f"Document {filename} supprimé "
+                "alors qu'une génération était "
+                "encore enregistrée comme active."
             )
 
             print(
-                f"[Documents] "
-                f"Les insertions sur d'anciens chunks "
-                f"seront ignorées."
+                "[Documents] "
+                "Les insertions sur d'anciens "
+                "chunks seront ignorées."
             )
 
         return {
-            "message": (
-                f"{filename} supprimé avec succès."
-            ),
+            "message":
+                f"{filename} supprimé avec succès.",
+
             **result
         }
 
@@ -476,22 +448,19 @@ def remove_document(
     except Exception as error:
 
         print(
+            "[Documents] "
             f"Erreur lors de la suppression "
-            f"de {filename} : {error}"
+            f"de {filename}: {error}"
         )
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "Erreur lors de la suppression "
-                "du document."
+                "Erreur lors de la "
+                "suppression du document."
             )
         )
 
     finally:
-
-        # ----------------------------------------------------
-        # Libération obligatoire de la priorité 2.
-        # ----------------------------------------------------
 
         task_manager.end_pdf_operation()

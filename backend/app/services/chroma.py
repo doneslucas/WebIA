@@ -1,51 +1,40 @@
+import os
+
 import chromadb
+from dotenv import load_dotenv
 
+load_dotenv()
 
-client = chromadb.PersistentClient(
-    path="./chroma_db"
+CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
+CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
+
+client = chromadb.HttpClient(
+    host=CHROMA_HOST,
+    port=CHROMA_PORT
 )
-
 
 collection = client.get_or_create_collection(
     name="documents"
 )
 
 
-def add_chunks(
-    chunks,
-    vectors,
-    file_name: str
-):
+def add_chunks(chunks, vectors, file_name: str):
     collection.add(
-        ids=[
-            f"{file_name}_chunk_{i}"
-            for i in range(len(chunks))
-        ],
-        documents=[
-            chunk.page_content
-            for chunk in chunks
-        ],
+        ids=[f"{file_name}_chunk_{i}" for i in range(len(chunks))],
+        documents=[chunk.page_content for chunk in chunks],
         embeddings=vectors,
-        metadatas=[
-            chunk.metadata
-            for chunk in chunks
-        ]
+        metadatas=[chunk.metadata for chunk in chunks]
     )
 
 
-def search_chunks(
-    query_vector,
-    n_results=3
-):
+def search_chunks(query_vector, n_results=3):
     return collection.query(
         query_embeddings=[query_vector],
         n_results=n_results
     )
 
 
-def get_file_chroma_ids(
-    file_name: str
-):
+def get_file_chroma_ids(file_name: str):
     results = collection.get(
         include=["metadatas"]
     )
@@ -55,49 +44,24 @@ def get_file_chroma_ids(
 
     matching_ids = []
 
-    for chroma_id, metadata in zip(
-        ids,
-        metadatas
-    ):
+    for chroma_id, metadata in zip(ids, metadatas):
         if not metadata:
             continue
 
-        source = metadata.get(
-            "source",
-            ""
-        )
+        source = metadata.get("source", "")
 
-        if (
-            str(source).replace(
-                "\\",
-                "/"
-            ).endswith(
-                f"/{file_name}"
-            )
-        ):
-            matching_ids.append(
-                chroma_id
-            )
+        if str(source).replace("\\", "/").endswith(f"/{file_name}"):
+            matching_ids.append(chroma_id)
 
     return matching_ids
 
 
-def is_file_indexed(
-    file_name: str
-):
-    return bool(
-        get_file_chroma_ids(
-            file_name
-        )
-    )
+def is_file_indexed(file_name: str):
+    return bool(get_file_chroma_ids(file_name))
 
 
-def get_file_hash(
-    file_name: str
-):
-    chroma_ids = get_file_chroma_ids(
-        file_name
-    )
+def get_file_hash(file_name: str):
+    chroma_ids = get_file_chroma_ids(file_name)
 
     if not chroma_ids:
         return None
@@ -107,25 +71,16 @@ def get_file_hash(
         include=["metadatas"]
     )
 
-    metadatas = results.get(
-        "metadatas",
-        []
-    )
+    metadatas = results.get("metadatas", [])
 
     if not metadatas:
         return None
 
-    return metadatas[0].get(
-        "file_hash"
-    )
+    return metadatas[0].get("file_hash")
 
 
-def delete_file(
-    file_name: str
-):
-    chroma_ids = get_file_chroma_ids(
-        file_name
-    )
+def delete_file(file_name: str):
+    chroma_ids = get_file_chroma_ids(file_name)
 
     if not chroma_ids:
         return 0

@@ -4,6 +4,8 @@ from pydantic import BaseModel
 from app.services.auth import verify_token
 from app.services.quiz import (
     generate_quiz,
+    generate_mixed_quiz,
+    get_quiz_generation_status,
     check_quiz_answer
 )
 from app.database.connection import get_connection
@@ -19,6 +21,13 @@ class QuizGenerationRequest(BaseModel):
     document: str
     question_count: int
     difficulty: str
+
+
+class MixedQuizGenerationRequest(BaseModel):
+    document: str
+    question_count: int
+    primary_difficulty: str
+    secondary_difficulty: str
 
 
 class QuizAnswer(BaseModel):
@@ -51,7 +60,10 @@ def generate_quiz_route(
     }:
         raise HTTPException(
             status_code=422,
-            detail="Le nombre de questions doit être 5, 10, 15 ou 20."
+            detail=(
+                "Le nombre de questions doit être "
+                "5, 10, 15 ou 20."
+            )
         )
 
     if request.difficulty not in {
@@ -61,10 +73,14 @@ def generate_quiz_route(
     }:
         raise HTTPException(
             status_code=422,
-            detail="La difficulté doit être easy, medium ou hard."
+            detail=(
+                "La difficulté doit être "
+                "easy, medium ou hard."
+            )
         )
 
     try:
+
         return generate_quiz(
             document=request.document,
             question_count=request.question_count,
@@ -73,19 +89,191 @@ def generate_quiz_route(
         )
 
     except ValueError as error:
+
         raise HTTPException(
             status_code=400,
             detail=str(error)
         )
 
     except Exception as error:
+
         print(
-            f"Erreur lors de la génération du quiz : {error}"
+            f"Erreur lors de la génération du quiz : "
+            f"{error}"
         )
 
         raise HTTPException(
             status_code=500,
             detail="Erreur lors de la génération du quiz."
+        )
+
+
+@router.post("/generate-mixed")
+def generate_mixed_quiz_route(
+    request: MixedQuizGenerationRequest,
+    payload: dict = Depends(verify_token)
+):
+    user_id = payload.get("user_id")
+
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Identifiant utilisateur absent du token."
+        )
+
+    if request.question_count not in {
+        5,
+        10,
+        15,
+        20
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Le nombre de questions doit être "
+                "5, 10, 15 ou 20."
+            )
+        )
+
+    valid_difficulties = {
+        "easy",
+        "medium",
+        "hard"
+    }
+
+    if request.primary_difficulty not in valid_difficulties:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "La difficulté principale doit être "
+                "easy, medium ou hard."
+            )
+        )
+
+    if request.secondary_difficulty not in valid_difficulties:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "La difficulté secondaire doit être "
+                "easy, medium ou hard."
+            )
+        )
+
+    if (
+        request.primary_difficulty
+        == request.secondary_difficulty
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Les deux difficultés doivent être différentes."
+            )
+        )
+
+    try:
+
+        return generate_mixed_quiz(
+            document=request.document,
+            question_count=request.question_count,
+            primary_difficulty=request.primary_difficulty,
+            secondary_difficulty=request.secondary_difficulty,
+            user_id=user_id
+        )
+
+    except ValueError as error:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
+
+    except Exception as error:
+
+        print(
+            "Erreur lors de la génération "
+            f"du quiz mixte : {error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Erreur lors de la génération "
+                "du quiz mixte."
+            )
+        )
+
+
+@router.get("/generation-status")
+def quiz_generation_status_route(
+    document: str,
+    difficulty: str,
+    requested_count: int,
+    payload: dict = Depends(verify_token)
+):
+    user_id = payload.get("user_id")
+
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Identifiant utilisateur absent du token."
+        )
+
+    if difficulty not in {
+        "easy",
+        "medium",
+        "hard"
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "La difficulté doit être "
+                "easy, medium ou hard."
+            )
+        )
+
+    if requested_count not in {
+        5,
+        10,
+        15,
+        20
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Le nombre de questions doit être "
+                "5, 10, 15 ou 20."
+            )
+        )
+
+    try:
+
+        return get_quiz_generation_status(
+            document=document,
+            difficulty=difficulty,
+            user_id=user_id,
+            requested_count=requested_count
+        )
+
+    except ValueError as error:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
+
+    except Exception as error:
+
+        print(
+            "Erreur lors de la récupération "
+            f"du statut de génération : {error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Impossible de récupérer "
+                "le statut de génération."
+            )
         )
 
 
@@ -110,31 +298,39 @@ def check_answer(
     }:
         raise HTTPException(
             status_code=422,
-            detail="La réponse doit être un entier compris entre 0 et 3."
+            detail=(
+                "La réponse doit être un entier "
+                "compris entre 0 et 3."
+            )
         )
 
     try:
-        result = check_quiz_answer(
+
+        return check_quiz_answer(
             question_id=request.question_id,
             answer=request.answer
         )
 
-        return result
-
     except ValueError as error:
+
         raise HTTPException(
             status_code=404,
             detail=str(error)
         )
 
     except Exception as error:
+
         print(
-            f"Erreur lors de la vérification de la réponse : {error}"
+            "Erreur lors de la vérification "
+            f"de la réponse : {error}"
         )
 
         raise HTTPException(
             status_code=500,
-            detail="Erreur lors de la vérification de la réponse."
+            detail=(
+                "Erreur lors de la vérification "
+                "de la réponse."
+            )
         )
 
 
@@ -168,8 +364,8 @@ def submit_quiz(
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "Chaque réponse doit être un entier compris "
-                    "entre 0 et 3."
+                    "Chaque réponse doit être un entier "
+                    "compris entre 0 et 3."
                 )
             )
 
@@ -179,6 +375,7 @@ def submit_quiz(
     ]
 
     with get_connection() as conn:
+
         with conn.cursor() as cursor:
 
             cursor.execute(
@@ -198,12 +395,17 @@ def submit_quiz(
             if len(questions) != len(set(question_ids)):
                 raise HTTPException(
                     status_code=404,
-                    detail="Une ou plusieurs questions sont introuvables."
+                    detail=(
+                        "Une ou plusieurs questions "
+                        "sont introuvables."
+                    )
                 )
 
             questions_by_id = {
                 question[0]: {
-                    "correct_answer": int(question[1]),
+                    "correct_answer": int(
+                        question[1]
+                    ),
                     "explanation": question[2]
                 }
                 for question in questions
@@ -222,8 +424,9 @@ def submit_quiz(
                     raise HTTPException(
                         status_code=404,
                         detail=(
-                            f"Question "
-                            f"{submitted_answer.question_id} introuvable."
+                            "Question "
+                            f"{submitted_answer.question_id} "
+                            "introuvable."
                         )
                     )
 
@@ -239,11 +442,16 @@ def submit_quiz(
 
                 results.append(
                     {
-                        "question_id": submitted_answer.question_id,
-                        "answer_given": answer_given,
-                        "correct_answer": correct_answer,
-                        "is_correct": is_correct,
-                        "explanation": question["explanation"]
+                        "question_id":
+                            submitted_answer.question_id,
+                        "answer_given":
+                            answer_given,
+                        "correct_answer":
+                            correct_answer,
+                        "is_correct":
+                            is_correct,
+                        "explanation":
+                            question["explanation"]
                     }
                 )
 
@@ -258,7 +466,11 @@ def submit_quiz(
                     score,
                     total_questions
                 )
-                VALUES (%s, %s, %s)
+                VALUES (
+                    %s,
+                    %s,
+                    %s
+                )
                 RETURNING id
                 """,
                 (
@@ -280,7 +492,12 @@ def submit_quiz(
                         answer_given,
                         is_correct
                     )
-                    VALUES (%s, %s, %s, %s)
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
                     """,
                     (
                         quiz_result_id,
@@ -293,9 +510,14 @@ def submit_quiz(
             conn.commit()
 
     return {
-        "message": "Quiz enregistré avec succès.",
-        "quiz_result_id": quiz_result_id,
-        "score": score,
-        "total_questions": total_questions,
-        "results": results
+        "message":
+            "Quiz enregistré avec succès.",
+        "quiz_result_id":
+            quiz_result_id,
+        "score":
+            score,
+        "total_questions":
+            total_questions,
+        "results":
+            results
     }

@@ -1,17 +1,42 @@
+import os
+
+from dotenv import load_dotenv
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 
 from app.services.chroma import search_chunks
 
 
-# Modèle utilisé pour transformer les questions en vecteurs
+load_dotenv()
+
+
+# -------------------------------------------------
+# Configuration Ollama
+# -------------------------------------------------
+
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "localhost")
+OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
+
+OLLAMA_BASE_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
+
+
+# -------------------------------------------------
+# Modèle utilisé pour transformer les questions
+# en vecteurs
+# -------------------------------------------------
+
 embeddings = OllamaEmbeddings(
-    model="nomic-embed-text"
+    model="nomic-embed-text",
+    base_url=OLLAMA_BASE_URL
 )
 
 
+# -------------------------------------------------
 # Modèle utilisé pour générer les réponses
+# -------------------------------------------------
+
 llm = OllamaLLM(
     model="qwen2.5:7b",
+    base_url=OLLAMA_BASE_URL,
     num_predict=250
 )
 

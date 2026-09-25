@@ -1,15 +1,19 @@
 import json
+import os
 import re
 
 from typing import Callable
+from threading import Lock
 
+from dotenv import load_dotenv
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 
 from app.services.task_manager import task_manager
-
 from app.database.connection import get_connection
-from threading import Lock
 from app.services.chroma import collection
+
+
+load_dotenv()
 
 
 CRITICAL_THRESHOLD = 20
@@ -23,17 +27,49 @@ MAX_EMPTY_PASSES = 3
 
 QUIZ_NUM_PREDICT = 1000
 
+
 generation_lock = Lock()
 
 active_generations = set()
 
-embeddings = OllamaEmbeddings(
-    model="nomic-embed-text"
+
+# -------------------------------------------------
+# Configuration Ollama
+# -------------------------------------------------
+
+OLLAMA_HOST = os.getenv(
+    "OLLAMA_HOST",
+    "localhost"
+)
+
+OLLAMA_PORT = os.getenv(
+    "OLLAMA_PORT",
+    "11434"
+)
+
+OLLAMA_BASE_URL = (
+    f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 )
 
 
+# -------------------------------------------------
+# Modèle utilisé pour transformer les chunks/questions
+# en vecteurs
+# -------------------------------------------------
+
+embeddings = OllamaEmbeddings(
+    model="nomic-embed-text",
+    base_url=OLLAMA_BASE_URL
+)
+
+
+# -------------------------------------------------
+# Modèle utilisé pour générer les questions
+# -------------------------------------------------
+
 llm = OllamaLLM(
     model="llama3.2:latest",
+    base_url=OLLAMA_BASE_URL,
     num_predict=QUIZ_NUM_PREDICT,
     format="json",
     temperature=0.5
@@ -445,6 +481,182 @@ def get_user_seen_question_ids(
             }
 
 
+def count_available_questions(
+    document: str,
+    difficulty: str,
+    user_id: int
+):
+    """
+    Retourne le nombre de questions disponibles
+    pour cet utilisateur.
+
+    Une question déjà utilisée par l'utilisateur
+    n'est plus considérée comme disponible.
+    """
+
+    document_ids = get_documents_scope(
+        document
+    )
+
+    seen_question_ids = (
+        get_user_seen_question_ids(
+            user_id=user_id,
+            document=document,
+            difficulty=difficulty
+        )
+    )
+
+    with get_connection() as conn:
+
+        with conn.cursor() as cursor:
+
+            if seen_question_ids:
+
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM quiz_questions qq
+
+                    JOIN document_chunks dc
+                        ON qq.chunk_id = dc.id
+
+                    WHERE dc.document_id = ANY(%s)
+                      AND qq.difficulty = %s
+                      AND NOT (qq.id = ANY(%s))
+                    """,
+                    (
+                        document_ids,
+                        difficulty,
+                        list(seen_question_ids)
+                    )
+                )
+
+            else:
+
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM quiz_questions qq
+
+                    JOIN document_chunks dc
+                        ON qq.chunk_id = dc.id
+
+                    WHERE dc.document_id = ANY(%s)
+                      AND qq.difficulty = %s
+                    """,
+                    (
+                        document_ids,
+                        difficulty
+                    )
+                )
+
+            return cursor.fetchone()[0]
+
+
+def get_generation_status(
+    document: str,
+    difficulty: str,
+    user_id: int,
+    requested_count: int
+):
+    """
+    Retourne l'état d'une banque de questions
+    pour permettre au frontend de suivre
+    une génération.
+    """
+
+    total_count = count_questions(
+        document,
+        difficulty
+    )
+
+    available_count = count_available_questions(
+        document=document,
+        difficulty=difficulty,
+        user_id=user_id
+    )
+
+    max_capacity = get_max_capacity(
+        document
+    )
+
+    target_count = min(
+        TARGET_QUESTION_COUNT,
+        max_capacity
+    )
+
+    generation_key = (
+        document,
+        difficulty
+    )
+
+    with generation_lock:
+
+        generation_active = (
+            generation_key
+            in active_generations
+        )
+
+    missing_for_quiz = max(
+        0,
+        requested_count - available_count
+    )
+
+    return {
+        "document": document,
+        "difficulty": difficulty,
+        "requested_count": requested_count,
+        "total_count": total_count,
+        "available_count": available_count,
+        "missing_count": missing_for_quiz,
+        "target_count": target_count,
+        "capacity": max_capacity,
+        "generation_active": generation_active,
+        "ready": (
+            available_count
+            >= requested_count
+        )
+    }
+
+
+def get_quiz_generation_status(
+    document: str,
+    difficulty: str,
+    user_id: int,
+    requested_count: int
+):
+    """
+    Fonction utilisée par la route API pour suivre
+    la génération d'une banque.
+    """
+
+    if difficulty not in {
+        "easy",
+        "medium",
+        "hard"
+    }:
+        raise ValueError(
+            "La difficulté doit être easy, medium ou hard."
+        )
+
+    if requested_count not in {
+        5,
+        10,
+        15,
+        20
+    }:
+        raise ValueError(
+            "Le nombre de questions doit être 5, 10, 15 ou 20."
+        )
+
+    return get_generation_status(
+        document=document,
+        difficulty=difficulty,
+        user_id=user_id,
+        requested_count=requested_count
+    )
+
+
 def get_chunk_context(
     chroma_id: str
 ):
@@ -737,9 +949,6 @@ def save_questions(
 
         with conn.cursor() as cursor:
 
-            # Vérification supplémentaire :
-            # le chunk peut avoir été supprimé/recréé
-            # entre get_available_chunks() et save_questions().
             cursor.execute(
                 """
                 SELECT id
@@ -827,10 +1036,6 @@ def save_questions(
                 ):
                     continue
 
-                # Nouvelle vérification juste avant
-                # l'insertion afin de réduire le risque
-                # qu'un chunk supprimé entre-temps
-                # provoque une violation de clé étrangère.
                 cursor.execute(
                     """
                     SELECT id
@@ -925,17 +1130,6 @@ def generate_questions_for_bank(
     plus de capacité disponible ou lorsque plusieurs
     passages complets n'ont produit aucune nouvelle
     question.
-
-    progress_callback est appelé après chaque progression
-    réelle de la banque.
-
-    background=True :
-        La fonction est utilisée par la génération automatique.
-        Elle respecte donc la priorité du chatbot et du quiz.
-
-    background=False :
-        La fonction est appelée directement pour répondre
-        à une demande utilisateur.
     """
 
     generated_count = count_questions(
@@ -1010,19 +1204,6 @@ def generate_questions_for_bank(
                         difficulty
                     )
                 )
-
-                # ------------------------------------------------
-                # PRIORITÉ
-                #
-                # La génération automatique est une tâche
-                # de priorité 3.
-                #
-                # On attend juste avant l'appel au LLM.
-                #
-                # Ainsi, lorsqu'un chatbot ou un quiz utilisateur
-                # devient actif, la génération automatique ne lance
-                # pas de nouvel appel Ollama.
-                # ------------------------------------------------
 
                 if background:
 
@@ -1238,6 +1419,121 @@ def get_random_questions(
     return questions
 
 
+def get_mixed_quiz_questions(
+    document: str,
+    primary_difficulty: str,
+    fallback_difficulty: str,
+    question_count: int,
+    user_id: int
+):
+    """
+    Construit un quiz en utilisant d'abord les questions
+    disponibles de la difficulté demandée puis complète
+    avec une autre difficulté.
+    """
+
+    if primary_difficulty == fallback_difficulty:
+
+        raise ValueError(
+            "Les deux difficultés doivent être différentes."
+        )
+
+    primary_questions = get_random_questions(
+        document=document,
+        difficulty=primary_difficulty,
+        question_count=question_count,
+        user_id=user_id
+    )
+
+    if len(primary_questions) >= question_count:
+
+        return primary_questions[
+            :question_count
+        ]
+
+    missing_count = (
+        question_count
+        - len(primary_questions)
+    )
+
+    fallback_questions = get_random_questions(
+        document=document,
+        difficulty=fallback_difficulty,
+        question_count=missing_count,
+        user_id=user_id
+    )
+
+    if len(fallback_questions) < missing_count:
+
+        raise ValueError(
+            "La difficulté choisie ne contient pas "
+            "assez de questions non vues pour compléter le quiz."
+        )
+
+    questions = (
+        primary_questions
+        + fallback_questions
+    )
+
+    return questions[
+        :question_count
+    ]
+
+
+def get_mixed_difficulty_options(
+    document: str,
+    primary_difficulty: str,
+    question_count: int,
+    user_id: int
+):
+    """
+    Retourne les difficultés alternatives capables
+    de compléter le quiz.
+    """
+
+    difficulties = [
+        "easy",
+        "medium",
+        "hard"
+    ]
+
+    options = []
+
+    primary_available = count_available_questions(
+        document=document,
+        difficulty=primary_difficulty,
+        user_id=user_id
+    )
+
+    missing_count = max(
+        0,
+        question_count - primary_available
+    )
+
+    for difficulty in difficulties:
+
+        if difficulty == primary_difficulty:
+            continue
+
+        available = count_available_questions(
+            document=document,
+            difficulty=difficulty,
+            user_id=user_id
+        )
+
+        if available >= missing_count:
+
+            options.append(
+                {
+                    "difficulty": difficulty,
+                    "available_count": available,
+                    "questions_needed": missing_count
+                }
+            )
+
+    return options
+
+
 def check_quiz_answer(
     question_id: int,
     answer: int
@@ -1291,6 +1587,97 @@ def check_quiz_answer(
     }
 
 
+def generate_mixed_quiz(
+    document: str,
+    question_count: int,
+    primary_difficulty: str,
+    secondary_difficulty: str,
+    user_id: int
+):
+    """
+    Génère immédiatement un quiz mixte.
+
+    La difficulté principale est utilisée en priorité.
+    Si elle ne contient pas suffisamment de questions
+    non vues, la difficulté secondaire complète le quiz.
+
+    Cette fonction ne lance jamais Ollama.
+    """
+
+    task_manager.start_user_request()
+
+    try:
+
+        if question_count not in {
+            5,
+            10,
+            15,
+            20
+        }:
+
+            raise ValueError(
+                "Le nombre de questions doit être 5, 10, 15 ou 20."
+            )
+
+        valid_difficulties = {
+            "easy",
+            "medium",
+            "hard"
+        }
+
+        if primary_difficulty not in valid_difficulties:
+
+            raise ValueError(
+                "La difficulté principale doit être easy, medium ou hard."
+            )
+
+        if secondary_difficulty not in valid_difficulties:
+
+            raise ValueError(
+                "La difficulté secondaire doit être easy, medium ou hard."
+            )
+
+        if primary_difficulty == secondary_difficulty:
+
+            raise ValueError(
+                "Les deux difficultés doivent être différentes."
+            )
+
+        max_capacity = get_max_capacity(
+            document
+        )
+
+        if max_capacity == 0:
+
+            raise ValueError(
+                "Aucun chunk disponible pour ce document."
+            )
+
+        questions = get_mixed_quiz_questions(
+            document=document,
+            primary_difficulty=primary_difficulty,
+            fallback_difficulty=secondary_difficulty,
+            question_count=question_count,
+            user_id=user_id
+        )
+
+        if len(questions) != question_count:
+
+            raise ValueError(
+                "Impossible de constituer un quiz complet "
+                "avec les difficultés sélectionnées."
+            )
+
+        return {
+            "status": "ready",
+            "questions": questions
+        }
+
+    finally:
+
+        task_manager.end_user_request()
+
+
 def generate_quiz(
     document: str,
     question_count: int,
@@ -1298,13 +1685,17 @@ def generate_quiz(
     user_id: int
 ):
     """
-    Génère/récupère un quiz demandé directement
-    par un utilisateur.
+    Récupère uniquement les questions déjà disponibles.
 
-    Cette fonction est une tâche de priorité 1.
+    Cette fonction ne lance plus Ollama.
 
-    Pendant toute sa durée, la génération automatique
-    de priorité 3 est mise en pause.
+    Si le nombre de questions non vues est insuffisant,
+    elle retourne une réponse structurée permettant au
+    frontend de proposer :
+
+    1. Jouer avec les questions disponibles.
+    2. Compléter avec une autre difficulté.
+    3. Attendre la génération de nouvelles questions.
     """
 
     task_manager.start_user_request()
@@ -1342,46 +1733,78 @@ def generate_quiz(
                 "Aucun chunk disponible pour ce document."
             )
 
-        current_count = count_questions(
-            document,
-            difficulty
-        )
-
-        target_bank_size = min(
-            TARGET_QUESTION_COUNT,
-            max_capacity
-        )
-
-        if current_count < target_bank_size:
-
-            print(
-                f"Banque {difficulty} : "
-                f"{current_count}/{target_bank_size} questions."
-            )
-
-            generate_questions_for_bank(
-                document=document,
-                difficulty=difficulty,
-                target_count=target_bank_size,
-                background=False
-            )
-
-        questions = get_random_questions(
+        available_count = count_available_questions(
             document=document,
             difficulty=difficulty,
+            user_id=user_id
+        )
+
+        if available_count >= question_count:
+
+            questions = get_random_questions(
+                document=document,
+                difficulty=difficulty,
+                question_count=question_count,
+                user_id=user_id
+            )
+
+            if len(questions) < question_count:
+
+                raise ValueError(
+                    "Les questions disponibles ont changé "
+                    "pendant la préparation du quiz."
+                )
+
+            return {
+                "status": "ready",
+                "questions": questions
+            }
+
+        missing_count = (
+            question_count
+            - available_count
+        )
+
+        mixed_options = get_mixed_difficulty_options(
+            document=document,
+            primary_difficulty=difficulty,
             question_count=question_count,
             user_id=user_id
         )
 
-        if len(questions) < question_count:
-
-            raise ValueError(
-                "Pas assez de questions non vues disponibles "
-                "pour cet utilisateur."
-            )
+        generation_status = get_generation_status(
+            document=document,
+            difficulty=difficulty,
+            user_id=user_id,
+            requested_count=question_count
+        )
 
         return {
-            "questions": questions
+            "status": "insufficient_questions",
+            "questions": [],
+            "document": document,
+            "difficulty": difficulty,
+            "requested_count": question_count,
+            "available_count": available_count,
+            "missing_count": missing_count,
+            "generation": generation_status,
+            "options": {
+                "available": {
+                    "enabled": available_count > 0,
+                    "question_count": available_count
+                },
+                "mixed": {
+                    "enabled": len(mixed_options) > 0,
+                    "difficulties": mixed_options
+                },
+                "wait": {
+                    "enabled": True,
+                    "missing_count": missing_count,
+                    "generation_active": generation_status[
+                        "generation_active"
+                    ]
+                }
+            }
         }
 
     finally:

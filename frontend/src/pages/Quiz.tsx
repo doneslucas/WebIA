@@ -1,11 +1,25 @@
-// frontend/src/pages/Quiz.tsx
-
 import "./Quiz.css";
+
+import {
+  useEffect,
+  useState,
+} from "react";
 
 import {
   useQuiz,
   type QuizQuestion,
 } from "../contexts/QuizContext";
+
+import {
+  getDocuments,
+} from "../services/api";
+
+
+type DocumentItem = {
+  id: number;
+  file: string;
+  chunks: number;
+};
 
 
 function Quiz() {
@@ -32,11 +46,19 @@ function Quiz() {
     currentCorrectAnswer,
     currentExplanation,
 
+    generationChoice,
+    waitingForGeneration,
+
     setDocument,
     setQuestionCount,
     setDifficulty,
 
     startQuiz,
+
+    startWithAvailableQuestions,
+    startMixedQuiz,
+    waitForQuestions,
+    cancelGenerationChoice,
 
     selectAnswer,
     showQuestionCorrection,
@@ -46,6 +68,98 @@ function Quiz() {
 
     score,
   } = useQuiz();
+
+
+  const [
+    documents,
+    setDocuments
+  ] = useState<DocumentItem[]>([]);
+
+  const [
+    documentsLoading,
+    setDocumentsLoading
+  ] = useState(true);
+
+  const [
+    documentsError,
+    setDocumentsError
+  ] = useState("");
+
+
+  useEffect(() => {
+
+    async function loadDocuments() {
+
+      setDocumentsLoading(true);
+      setDocumentsError("");
+
+      try {
+
+        const result =
+          await getDocuments();
+
+        if (!result.response.ok) {
+
+          throw new Error(
+            result.data.detail ||
+            "Impossible de récupérer les documents."
+          );
+        }
+
+        if (
+          !result.data.documents ||
+          !Array.isArray(
+            result.data.documents
+          )
+        ) {
+
+          throw new Error(
+            "Le serveur n'a pas retourné une liste de documents valide."
+          );
+        }
+
+        const validDocuments =
+          result.data.documents.filter(
+            (item: DocumentItem) =>
+              typeof item.id === "number" &&
+              typeof item.file === "string"
+          );
+
+        setDocuments(
+          validDocuments
+        );
+
+      } catch (error) {
+
+        console.error(
+          "Erreur lors du chargement des documents :",
+          error
+        );
+
+        if (
+          error instanceof Error
+        ) {
+
+          setDocumentsError(
+            error.message
+          );
+
+        } else {
+
+          setDocumentsError(
+            "Impossible de charger les documents."
+          );
+        }
+
+      } finally {
+
+        setDocumentsLoading(false);
+      }
+    }
+
+    loadDocuments();
+
+  }, []);
 
 
   function getResultInfo(
@@ -269,26 +383,59 @@ function Quiz() {
                       event.target.value
                     )
                   }
-                  disabled={loading}
+                  disabled={
+                    loading ||
+                    documentsLoading
+                  }
                 >
 
                   <option value="all">
                     Tous les documents
                   </option>
 
-                  <option value="Cybermenaces.pdf">
-                    Cybermenaces.pdf
-                  </option>
 
-                  <option value="Le_Phishing.pdf">
-                    Le_Phishing.pdf
-                  </option>
+                  {documents.map(
+                    (item) => (
 
-                  <option value="test.pdf">
-                    test.pdf
-                  </option>
+                      <option
+                        key={item.id}
+                        value={item.file}
+                      >
+                        {item.file}
+                      </option>
+
+                    )
+                  )}
 
                 </select>
+
+
+                {documentsLoading && (
+
+                  <p
+                    className="quiz-message"
+                    style={{
+                      marginTop: "8px",
+                    }}
+                  >
+                    Chargement des documents...
+                  </p>
+
+                )}
+
+
+                {documentsError && (
+
+                  <p
+                    className="quiz-message"
+                    style={{
+                      marginTop: "8px",
+                    }}
+                  >
+                    {documentsError}
+                  </p>
+
+                )}
 
               </div>
 
@@ -383,9 +530,11 @@ function Quiz() {
 
 
             {message && (
+
               <p className="quiz-message">
                 {message}
               </p>
+
             )}
 
 
@@ -393,16 +542,202 @@ function Quiz() {
               type="button"
               className="quiz-start-button"
               onClick={startQuiz}
-              disabled={loading}
+              disabled={
+                loading ||
+                documentsLoading
+              }
             >
 
               {loading
-                ? "Génération du quiz..."
+                ? "Préparation du quiz..."
                 : "Générer le quiz"}
 
             </button>
 
           </section>
+
+
+          {generationChoice && (
+
+            <section
+              className="quiz-configuration"
+              style={{
+                marginTop: "20px",
+              }}
+            >
+
+              <div className="quiz-section-header">
+
+                <h2>
+                  Pas assez de questions disponibles
+                </h2>
+
+                <p>
+                  Tu demandes{" "}
+                  <strong>
+                    {generationChoice.requested_count}
+                  </strong>{" "}
+                  questions en difficulté{" "}
+                  <strong>
+                    {generationChoice.difficulty}
+                  </strong>
+                  , mais seulement{" "}
+                  <strong>
+                    {generationChoice.available_count}
+                  </strong>{" "}
+                  questions non vues sont actuellement
+                  disponibles.
+                </p>
+
+              </div>
+
+
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "12px",
+                }}
+              >
+
+                {generationChoice.options.available.enabled && (
+
+                  <button
+                    type="button"
+                    className="quiz-start-button"
+                    onClick={
+                      startWithAvailableQuestions
+                    }
+                    disabled={
+                      loading ||
+                      waitingForGeneration
+                    }
+                  >
+
+                    ▶️ Jouer maintenant avec{" "}
+                    {
+                      generationChoice.options
+                        .available.question_count
+                    }{" "}
+                    questions
+
+                  </button>
+
+                )}
+
+
+                {generationChoice.options.mixed.enabled && (
+
+                  <>
+
+                    <p
+                      style={{
+                        marginBottom: "0",
+                        marginTop: "8px",
+                      }}
+                    >
+
+                      <strong>
+                        Compléter avec une autre difficulté :
+                      </strong>
+
+                    </p>
+
+
+                    {generationChoice.options.mixed.difficulties.map(
+                      (option) => (
+
+                        <button
+                          type="button"
+                          key={option.difficulty}
+                          className="quiz-start-button"
+                          onClick={() =>
+                            startMixedQuiz(
+                              option.difficulty
+                            )
+                          }
+                          disabled={
+                            loading ||
+                            waitingForGeneration
+                          }
+                        >
+
+                          🔀 Compléter avec{" "}
+                          {option.difficulty}{" "}
+                          (
+                          {option.questions_needed}{" "}
+                          questions)
+
+                        </button>
+
+                      )
+                    )}
+
+                  </>
+
+                )}
+
+
+                {generationChoice.options.wait.enabled && (
+
+                  <button
+                    type="button"
+                    className="quiz-start-button"
+                    onClick={
+                      waitForQuestions
+                    }
+                    disabled={
+                      loading ||
+                      waitingForGeneration
+                    }
+                  >
+
+                    {waitingForGeneration
+                      ? "⏳ Génération en cours..."
+                      : `⏳ Attendre la génération des ${generationChoice.missing_count} questions restantes`}
+
+                  </button>
+
+                )}
+
+
+                <button
+                  type="button"
+                  className="quiz-start-button"
+                  onClick={
+                    cancelGenerationChoice
+                  }
+                  disabled={
+                    loading
+                  }
+                >
+
+                  Annuler
+
+                </button>
+
+              </div>
+
+
+              {waitingForGeneration && (
+
+                <p
+                  className="quiz-message"
+                  style={{
+                    marginTop: "15px",
+                  }}
+                >
+
+                  {message ||
+                    "La banque de questions est en cours de génération. Cette page vérifie régulièrement la progression."}
+
+                </p>
+
+              )}
+
+            </section>
+
+          )}
 
         </main>
 
@@ -679,9 +1014,11 @@ function Quiz() {
                 }
                 disabled={loading}
               >
+
                 {loading
                   ? "Vérification..."
                   : "Vérifier ma réponse"}
+
               </button>
 
             ) : (

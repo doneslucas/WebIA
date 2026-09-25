@@ -1,0 +1,78 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: webia_frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - frontend_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: webia_backend
+    env_file:
+      - .env.docker
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - ollama
+      - chroma
+    networks:
+      - frontend_network
+      - backend_network
+    volumes:
+      - ./backend/documents:/app/documents
+
+  postgres:
+    image: postgres:18
+    container_name: webia_postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - backend_network
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: webia_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - backend_network
+
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: webia_chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/data
+    networks:
+      - backend_network
+
+networks:
+  frontend_network:
+    driver: bridge
+
+  backend_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  ollama_data:
+  chroma_data:
+  documents_data:

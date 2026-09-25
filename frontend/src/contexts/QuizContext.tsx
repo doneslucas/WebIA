@@ -7,6 +7,8 @@ import {
 
 import {
   generateQuiz,
+  generateMixedQuiz,
+  getQuizGenerationStatus,
   checkQuizAnswer,
   submitQuiz,
 } from "../services/api";
@@ -17,6 +19,53 @@ export type QuizQuestion = {
   question: string;
   options: string[];
   difficulty: string;
+};
+
+
+export type QuizGenerationOption = {
+  difficulty: string;
+  available_count: number;
+  questions_needed: number;
+};
+
+
+export type QuizGenerationData = {
+  document: string;
+  difficulty: string;
+  requested_count: number;
+  available_count: number;
+  missing_count: number;
+
+  options: {
+    available: {
+      enabled: boolean;
+      question_count: number;
+    };
+
+    mixed: {
+      enabled: boolean;
+      difficulties: QuizGenerationOption[];
+    };
+
+    wait: {
+      enabled: boolean;
+      missing_count: number;
+      generation_active: boolean;
+    };
+  };
+
+  generation: {
+    document: string;
+    difficulty: string;
+    requested_count: number;
+    total_count: number;
+    available_count: number;
+    missing_count: number;
+    target_count: number;
+    capacity: number;
+    generation_active: boolean;
+    ready: boolean;
+  };
 };
 
 
@@ -42,11 +91,26 @@ type QuizContextType = {
   currentCorrectAnswer: number | null;
   currentExplanation: string;
 
+  generationChoice:
+    QuizGenerationData | null;
+
+  waitingForGeneration: boolean;
+
   setDocument: (value: string) => void;
   setQuestionCount: (value: string) => void;
   setDifficulty: (value: string) => void;
 
   startQuiz: () => Promise<void>;
+
+  startWithAvailableQuestions: () => Promise<void>;
+
+  startMixedQuiz: (
+    fallbackDifficulty: string
+  ) => Promise<void>;
+
+  waitForQuestions: () => Promise<void>;
+
+  cancelGenerationChoice: () => void;
 
   selectAnswer: (answerIndex: number) => void;
   showQuestionCorrection: () => Promise<void>;
@@ -132,10 +196,59 @@ export function QuizProvider({
     useState(0);
 
 
+  const [
+    generationChoice,
+    setGenerationChoice
+  ] = useState<QuizGenerationData | null>(
+    null
+  );
+
+
+  const [
+    waitingForGeneration,
+    setWaitingForGeneration
+  ] = useState(false);
+
+
+  function initializeQuiz(
+    receivedQuestions: QuizQuestion[]
+  ) {
+
+    setQuestions(
+      receivedQuestions
+    );
+
+    setCurrentQuestion(0);
+
+    setAnswers([]);
+
+    setScore(0);
+
+    setShowCorrection(false);
+
+    setFinished(false);
+
+    setCurrentAnswerCorrect(null);
+
+    setCurrentCorrectAnswer(null);
+
+    setCurrentExplanation("");
+
+    setGenerationChoice(null);
+
+    setWaitingForGeneration(false);
+
+    setMessage("");
+
+    setQuizStarted(true);
+  }
+
+
   async function startQuiz() {
 
     setMessage("");
     setLoading(true);
+    setGenerationChoice(null);
 
     try {
 
@@ -150,7 +263,31 @@ export function QuizProvider({
 
         throw new Error(
           result.data.detail ||
-          "Erreur lors de la génération du quiz."
+          "Erreur lors de la préparation du quiz."
+        );
+      }
+
+
+      if (
+        result.data.status ===
+        "insufficient_questions"
+      ) {
+
+        setGenerationChoice(
+          result.data
+        );
+
+        return;
+      }
+
+
+      if (
+        result.data.status !==
+        "ready"
+      ) {
+
+        throw new Error(
+          "Réponse inattendue du serveur."
         );
       }
 
@@ -190,27 +327,9 @@ export function QuizProvider({
       }
 
 
-      setQuestions(
+      initializeQuiz(
         validQuestions
       );
-
-      setCurrentQuestion(0);
-
-      setAnswers([]);
-
-      setScore(0);
-
-      setShowCorrection(false);
-
-      setFinished(false);
-
-      setCurrentAnswerCorrect(null);
-
-      setCurrentCorrectAnswer(null);
-
-      setCurrentExplanation("");
-
-      setQuizStarted(true);
 
     } catch (error) {
 
@@ -226,7 +345,7 @@ export function QuizProvider({
       } else {
 
         setMessage(
-          "Une erreur est survenue lors de la génération du quiz."
+          "Une erreur est survenue lors de la préparation du quiz."
         );
       }
 
@@ -234,6 +353,313 @@ export function QuizProvider({
 
       setLoading(false);
     }
+  }
+
+
+  async function startWithAvailableQuestions() {
+
+    if (!generationChoice) {
+      return;
+    }
+
+    setLoading(true);
+    setMessage("");
+
+    try {
+
+      const availableCount =
+        generationChoice.available_count;
+
+      const result =
+        await generateQuiz(
+          document,
+          Math.min(
+            availableCount,
+            Number(questionCount)
+          ),
+          difficulty
+        );
+
+
+      if (!result.response.ok) {
+
+        throw new Error(
+          result.data.detail ||
+          "Impossible de récupérer les questions disponibles."
+        );
+      }
+
+
+      if (
+        result.data.status !==
+        "ready"
+      ) {
+
+        throw new Error(
+          "Les questions disponibles ont changé. Veuillez réessayer."
+        );
+      }
+
+
+      if (
+        !result.data.questions ||
+        !Array.isArray(result.data.questions)
+      ) {
+
+        throw new Error(
+          "Le serveur n'a pas retourné de questions valides."
+        );
+      }
+
+
+      initializeQuiz(
+        result.data.questions
+      );
+
+    } catch (error) {
+
+      console.error(error);
+
+      if (error instanceof Error) {
+
+        setMessage(
+          error.message
+        );
+
+      } else {
+
+        setMessage(
+          "Impossible de démarrer le quiz."
+        );
+      }
+
+    } finally {
+
+      setLoading(false);
+    }
+  }
+
+
+  async function startMixedQuiz(
+    fallbackDifficulty: string
+  ) {
+
+    if (!generationChoice) {
+      return;
+    }
+
+    setLoading(true);
+    setMessage("");
+
+    try {
+
+      const result =
+        await generateMixedQuiz(
+          document,
+          Number(questionCount),
+          difficulty,
+          fallbackDifficulty
+        );
+
+
+      if (!result.response.ok) {
+
+        throw new Error(
+          result.data.detail ||
+          "Impossible de compléter le quiz."
+        );
+      }
+
+
+      if (
+        result.data.status !==
+        "ready"
+      ) {
+
+        throw new Error(
+          "Le serveur n'a pas pu compléter le quiz."
+        );
+      }
+
+
+      if (
+        !result.data.questions ||
+        !Array.isArray(result.data.questions)
+      ) {
+
+        throw new Error(
+          "Le serveur n'a pas retourné de questions valides."
+        );
+      }
+
+
+      if (
+        result.data.questions.length !==
+        Number(questionCount)
+      ) {
+
+        throw new Error(
+          "Le quiz mixte ne contient pas le nombre demandé de questions."
+        );
+      }
+
+
+      initializeQuiz(
+        result.data.questions
+      );
+
+    } catch (error) {
+
+      console.error(error);
+
+      if (error instanceof Error) {
+
+        setMessage(
+          error.message
+        );
+
+      } else {
+
+        setMessage(
+          "Impossible de compléter le quiz."
+        );
+      }
+
+    } finally {
+
+      setLoading(false);
+    }
+  }
+
+
+  async function waitForQuestions() {
+
+    if (!generationChoice) {
+      return;
+    }
+
+    setWaitingForGeneration(true);
+    setLoading(true);
+    setMessage(
+      "En attente de nouvelles questions..."
+    );
+
+
+    try {
+
+      let attempts = 0;
+
+      const maxAttempts = 120;
+
+      while (
+        attempts < maxAttempts
+      ) {
+
+        attempts += 1;
+
+        const result =
+          await getQuizGenerationStatus(
+            document,
+            Number(questionCount),
+            difficulty
+          );
+
+
+        if (!result.response.ok) {
+
+          throw new Error(
+            result.data.detail ||
+            "Impossible de suivre la génération."
+          );
+        }
+
+
+        const status =
+          result.data;
+
+
+        if (
+          status.available_count >=
+          Number(questionCount)
+        ) {
+
+          const quizResult =
+            await generateQuiz(
+              document,
+              Number(questionCount),
+              difficulty
+            );
+
+
+          if (
+            quizResult.response.ok &&
+            quizResult.data.status ===
+            "ready"
+          ) {
+
+            initializeQuiz(
+              quizResult.data.questions
+            );
+
+            return;
+          }
+        }
+
+
+        setMessage(
+          `Génération en cours : ${
+            status.available_count
+          } / ${
+            Number(questionCount)
+          } questions disponibles.`
+        );
+
+
+        await new Promise(
+          (resolve) =>
+            setTimeout(
+              resolve,
+              3000
+            )
+        );
+      }
+
+
+      throw new Error(
+        "La génération prend plus de temps que prévu. Vous pouvez réessayer dans quelques instants."
+      );
+
+    } catch (error) {
+
+      console.error(error);
+
+      if (error instanceof Error) {
+
+        setMessage(
+          error.message
+        );
+
+      } else {
+
+        setMessage(
+          "Erreur lors du suivi de la génération."
+        );
+      }
+
+    } finally {
+
+      setLoading(false);
+      setWaitingForGeneration(false);
+    }
+  }
+
+
+  function cancelGenerationChoice() {
+
+    setGenerationChoice(null);
+    setWaitingForGeneration(false);
+    setLoading(false);
+    setMessage("");
   }
 
 
@@ -400,6 +826,7 @@ export function QuizProvider({
               if (
                 answer === undefined
               ) {
+
                 throw new Error(
                   "Toutes les questions doivent avoir une réponse."
                 );
@@ -521,6 +948,10 @@ export function QuizProvider({
 
     setCurrentExplanation("");
 
+    setGenerationChoice(null);
+
+    setWaitingForGeneration(false);
+
     setMessage("");
   }
 
@@ -549,11 +980,19 @@ export function QuizProvider({
         currentCorrectAnswer,
         currentExplanation,
 
+        generationChoice,
+        waitingForGeneration,
+
         setDocument,
         setQuestionCount,
         setDifficulty,
 
         startQuiz,
+
+        startWithAvailableQuestions,
+        startMixedQuiz,
+        waitForQuestions,
+        cancelGenerationChoice,
 
         selectAnswer,
         showQuestionCorrection,

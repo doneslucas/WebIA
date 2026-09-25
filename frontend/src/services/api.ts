@@ -4,7 +4,9 @@ const API_URL = "http://127.0.0.1:8000";
 async function refreshAccessToken(): Promise<string | null> {
 
   const refreshToken =
-    localStorage.getItem("refresh_token");
+    localStorage.getItem(
+      "refresh_token"
+    );
 
   if (!refreshToken) {
     return null;
@@ -12,23 +14,29 @@ async function refreshAccessToken(): Promise<string | null> {
 
   try {
 
-    const response = await fetch(
-      `${API_URL}/auth/refresh`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          refresh_token: refreshToken,
-        }),
-      }
-    );
+    const response =
+      await fetch(
+        `${API_URL}/auth/refresh`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            refresh_token: refreshToken,
+          }),
+        }
+      );
 
     if (!response.ok) {
 
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("refresh_token");
+      localStorage.removeItem(
+        "access_token"
+      );
+
+      localStorage.removeItem(
+        "refresh_token"
+      );
 
       return null;
     }
@@ -38,8 +46,13 @@ async function refreshAccessToken(): Promise<string | null> {
 
     if (!data.access_token) {
 
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("refresh_token");
+      localStorage.removeItem(
+        "access_token"
+      );
+
+      localStorage.removeItem(
+        "refresh_token"
+      );
 
       return null;
     }
@@ -70,10 +83,14 @@ async function authenticatedFetch(
 ): Promise<Response> {
 
   const token =
-    localStorage.getItem("access_token");
+    localStorage.getItem(
+      "access_token"
+    );
 
   const headers =
-    new Headers(options.headers);
+    new Headers(
+      options.headers
+    );
 
   if (token) {
 
@@ -104,11 +121,14 @@ async function authenticatedFetch(
     await refreshAccessToken();
 
   if (!newToken) {
+
     return response;
   }
 
   const retryHeaders =
-    new Headers(options.headers);
+    new Headers(
+      options.headers
+    );
 
   retryHeaders.set(
     "Authorization",
@@ -394,6 +414,14 @@ export async function changePassword(
 }
 
 
+/*
+ * Génération classique d'un quiz.
+ *
+ * Le backend décide si :
+ * - le quiz est immédiatement disponible ;
+ * - il n'y a pas assez de questions ;
+ * - plusieurs possibilités doivent être proposées.
+ */
 export async function generateQuiz(
   document: string,
   questionCount: number,
@@ -414,6 +442,91 @@ export async function generateQuiz(
             questionCount,
           difficulty,
         }),
+      }
+    );
+
+  const data =
+    await response.json();
+
+  return {
+    response,
+    data,
+  };
+}
+
+
+/*
+ * Génération d'un quiz en mélangeant
+ * plusieurs difficultés.
+ *
+ * Exemple :
+ * 8 questions faciles
+ * + 12 questions intermédiaires
+ * = 20 questions.
+ */
+export async function generateMixedQuiz(
+  document: string,
+  questionCount: number,
+  primaryDifficulty: string,
+  secondaryDifficulty: string
+) {
+
+  const response =
+    await authenticatedFetch(
+      `${API_URL}/quiz/generate-mixed`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          document,
+          question_count:
+            questionCount,
+          primary_difficulty:
+            primaryDifficulty,
+          secondary_difficulty:
+            secondaryDifficulty,
+        }),
+      }
+    );
+
+  const data =
+    await response.json();
+
+  return {
+    response,
+    data,
+  };
+}
+
+
+/*
+ * Vérifie l'état de génération d'une banque
+ * de questions pour un document et une difficulté.
+ *
+ * Cette fonction est utilisée lorsque
+ * l'utilisateur choisit "Attendre".
+ */
+export async function getQuizGenerationStatus(
+  document: string,
+  questionCount: number,
+  difficulty: string
+) {
+
+  const params =
+    new URLSearchParams({
+      document,
+      requested_count:
+        String(questionCount),
+      difficulty,
+    });
+
+  const response =
+    await authenticatedFetch(
+      `${API_URL}/quiz/generation-status?${params.toString()}`,
+      {
+        method: "GET",
       }
     );
 

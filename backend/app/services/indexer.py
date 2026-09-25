@@ -12,7 +12,8 @@ from app.services.pdf import (
 
 from app.services.chroma import (
     add_chunks,
-    delete_file
+    delete_file,
+    is_file_indexed
 )
 
 from app.services.quiz import (
@@ -134,18 +135,14 @@ def update_indexing_progress(
         )
     )
 
-    generation_progress[filename][
-        "indexing"
-    ] = {
+    generation_progress[filename]["indexing"] = {
         "status": status,
         "progress": progress,
         "stage": stage,
         "details": details
     }
 
-    generation_progress[filename][
-        "indexing_progress"
-    ] = progress
+    generation_progress[filename]["indexing_progress"] = progress
 
 
 def update_generation_progress(
@@ -187,16 +184,13 @@ def update_generation_progress(
                 "progress": 0
             }
         )
-
-        for difficulty_name
-        in QUIZ_DIFFICULTIES
+        for difficulty_name in QUIZ_DIFFICULTIES
     ]
 
     global_progress = int(
         sum(
             difficulty_data["progress"]
-            for difficulty_data
-            in difficulties
+            for difficulty_data in difficulties
         )
         / len(difficulties)
     )
@@ -630,6 +624,104 @@ def get_existing_document(
         connection.close()
 
 
+def get_existing_document_by_hash(
+    file_hash: str
+):
+    """
+    Recherche un document PostgreSQL possédant déjà
+    exactement le même contenu.
+
+    Cette recherche est indépendante du nom du fichier.
+    Elle permet d'éviter les doublons lorsque deux PDF
+    portent des noms différents mais ont exactement
+    le même contenu.
+    """
+
+    connection = get_connection()
+
+    try:
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    file_name,
+                    file_hash,
+                    chunk_count
+                FROM documents
+                WHERE file_hash = %s
+                """,
+                (file_hash,)
+            )
+
+            return cursor.fetchone()
+
+    finally:
+
+        connection.close()
+
+
+def delete_duplicate_file(
+    file_path: str,
+    requested_filename: str,
+    canonical_filename: str
+):
+    """
+    Supprime physiquement un fichier lorsqu'il est reconnu
+    comme un doublon exact d'un document canonique.
+
+    Le fichier canonique n'est jamais supprimé par cette fonction.
+    """
+
+    file_path_object = Path(file_path)
+
+    if not file_path_object.exists():
+        print(
+            f"[Indexer] "
+            f"Le doublon {requested_filename} "
+            f"n'existe déjà plus sur le disque."
+        )
+        return False
+
+    if requested_filename == canonical_filename:
+        print(
+            f"[Indexer] "
+            f"Sécurité : le fichier demandé correspond au "
+            f"document canonique. Suppression annulée."
+        )
+        return False
+
+    try:
+
+        file_path_object.unlink()
+
+        print(
+            f"[Indexer] "
+            f"Doublon supprimé physiquement : "
+            f"{requested_filename}"
+        )
+
+        print(
+            f"[Indexer] "
+            f"Document canonique conservé : "
+            f"{canonical_filename}"
+        )
+
+        return True
+
+    except Exception as error:
+
+        print(
+            f"[Indexer] "
+            f"Impossible de supprimer le doublon "
+            f"{requested_filename} : {error}"
+        )
+
+        raise
+
+
 # ============================================================
 # INDEXATION DU PDF
 # ============================================================
@@ -648,17 +740,19 @@ def index_pdf(
         filename
     ).name
 
+    requested_filename = filename
+
     print(
         f"[Indexer] "
-        f"Début de l'import : {filename}"
+        f"Début de l'import : {requested_filename}"
     )
 
     initialize_progress(
-        filename
+        requested_filename
     )
 
     update_indexing_progress(
-        filename=filename,
+        filename=requested_filename,
         progress=5,
         status="indexing",
         stage="hash",
@@ -673,88 +767,426 @@ def index_pdf(
 
         print(
             f"[Indexer] "
-            f"Hash SHA-256 calculé pour {filename} : "
+            f"Hash SHA-256 calculé pour "
+            f"{requested_filename} : "
             f"{file_hash}"
         )
 
         update_indexing_progress(
-            filename=filename,
+            filename=requested_filename,
             progress=10,
             status="indexing",
             stage="verification",
-            details="Vérification du document existant..."
+            details="Vérification de PostgreSQL et ChromaDB..."
         )
+
+        # ====================================================
+        # RECHERCHE PAR NOM
+        # ====================================================
 
         existing_document = get_existing_document(
-            filename
+            requested_filename
         )
 
-        if existing_document is not None:
+        # ====================================================
+        # RECHERCHE PAR HASH
+        # ====================================================
 
-            existing_document_id = existing_document[0]
-            existing_file_hash = existing_document[1]
-            existing_chunk_count = existing_document[2]
+        existing_document_by_hash = (
+            get_existing_document_by_hash(
+                file_hash
+            )
+        )
 
-            if existing_file_hash == file_hash:
+        # ====================================================
+        # CAS 1 :
+        # LE CONTENU EXISTE DÉJÀ SOUS UN AUTRE NOM
+        # ====================================================
+
+        if (
+            existing_document_by_hash is not None
+            and existing_document_by_hash[1]
+            != requested_filename
+        ):
+
+            canonical_document_id = (
+                existing_document_by_hash[0]
+            )
+
+            canonical_filename = (
+                existing_document_by_hash[1]
+            )
+
+            canonical_chunk_count = (
+                existing_document_by_hash[3]
+            )
+
+            print(
+                f"[Indexer] "
+                f"Contenu déjà présent dans PostgreSQL."
+            )
+
+            print(
+                f"[Indexer] "
+                f"Nom demandé : {requested_filename}"
+            )
+
+            print(
+                f"[Indexer] "
+                f"Nom canonique : {canonical_filename}"
+            )
+
+            print(
+                f"[Indexer] "
+                f"Les deux fichiers possèdent le même "
+                f"hash SHA-256."
+            )
+
+            print(
+                f"[Indexer] "
+                f"PostgreSQL ✓ : "
+                f"{canonical_filename}"
+            )
+
+            # On regarde ChromaDB avec le nom canonique,
+            # et non avec le nom du doublon.
+            chroma_indexed = is_file_indexed(
+                canonical_filename
+            )
+
+            if chroma_indexed:
 
                 print(
                     f"[Indexer] "
-                    f"Le document {filename} existe déjà "
-                    f"avec le même contenu."
+                    f"ChromaDB ✓ : "
+                    f"{canonical_filename}"
                 )
 
-                update_indexing_progress(
-                    filename=filename,
-                    progress=100,
-                    status="completed",
-                    stage="completed",
-                    details=(
-                        f"Document déjà indexé. "
-                        f"{existing_chunk_count} chunks conservés."
-                    )
+                print(
+                    f"[Indexer] "
+                    f"Le fichier {requested_filename} "
+                    f"est un doublon exact de contenu."
                 )
-
-                generation_progress[
-                    filename
-                ]["status"] = "generating"
 
                 print(
                     f"[Indexer] "
                     f"Aucune réindexation nécessaire."
                 )
 
+                # =================================================
+                # SUPPRESSION PHYSIQUE DU DOUBLON
+                # =================================================
+
+                duplicate_file_deleted = (
+                    delete_duplicate_file(
+                        file_path=file_path,
+                        requested_filename=requested_filename,
+                        canonical_filename=canonical_filename
+                    )
+                )
+
+                update_indexing_progress(
+                    filename=requested_filename,
+                    progress=100,
+                    status="completed",
+                    stage="completed",
+                    details=(
+                        f"Doublon supprimé. "
+                        f"Contenu déjà indexé sous "
+                        f"{canonical_filename}."
+                    )
+                )
+
+                generation_progress[
+                    requested_filename
+                ]["status"] = "completed"
+
+                generation_progress[
+                    requested_filename
+                ]["global_progress"] = 100
+
                 return {
-                    "filename": filename,
-                    "file": filename,
-                    "chunk_count": existing_chunk_count,
-                    "document_id": existing_document_id,
+                    "filename": canonical_filename,
+                    "requested_filename": requested_filename,
+                    "file": canonical_filename,
+                    "chunk_count": canonical_chunk_count,
+                    "document_id": canonical_document_id,
                     "already_indexed": True,
-                    "content_changed": False
+                    "duplicate_content": True,
+                    "canonical_filename": canonical_filename,
+                    "content_changed": False,
+                    "duplicate_file_deleted": duplicate_file_deleted
                 }
+
+            # =================================================
+            # POSTGRESQL ✓ / CHROMA ✗
+            # =================================================
 
             print(
                 f"[Indexer] "
-                f"Le document {filename} existe déjà "
-                f"mais son contenu a changé."
+                f"PostgreSQL ✓ | ChromaDB ✗"
             )
+
+            print(
+                f"[Indexer] "
+                f"Le contenu existe déjà sous "
+                f"{canonical_filename}, "
+                f"mais son index ChromaDB est absent."
+            )
+
+            print(
+                f"[Indexer] "
+                f"Reconstruction de ChromaDB "
+                f"sous le nom canonique "
+                f"{canonical_filename}."
+            )
+
+            filename = canonical_filename
 
             content_changed = True
 
         else:
 
-            print(
-                f"[Indexer] "
-                f"Nouveau document : {filename}"
-            )
+            # =================================================
+            # CAS 2 :
+            # DOCUMENT PRÉSENT PAR SON NOM
+            # =================================================
 
-            content_changed = False
+            if existing_document is not None:
+
+                existing_document_id = (
+                    existing_document[0]
+                )
+
+                existing_file_hash = (
+                    existing_document[1]
+                )
+
+                existing_chunk_count = (
+                    existing_document[2]
+                )
+
+                if existing_file_hash == file_hash:
+
+                    print(
+                        f"[Indexer] "
+                        f"{requested_filename} existe dans "
+                        f"PostgreSQL avec le même contenu."
+                    )
+
+                    chroma_indexed = is_file_indexed(
+                        requested_filename
+                    )
+
+                    if chroma_indexed:
+
+                        print(
+                            f"[Indexer] "
+                            f"{requested_filename} est également "
+                            f"présent dans ChromaDB."
+                        )
+
+                        update_indexing_progress(
+                            filename=requested_filename,
+                            progress=100,
+                            status="completed",
+                            stage="completed",
+                            details=(
+                                f"Document déjà synchronisé. "
+                                f"{existing_chunk_count} chunks."
+                            )
+                        )
+
+                        generation_progress[
+                            requested_filename
+                        ]["status"] = "generating"
+
+                        print(
+                            f"[Indexer] "
+                            f"PostgreSQL ✓ | ChromaDB ✓"
+                        )
+
+                        print(
+                            f"[Indexer] "
+                            f"Aucune réindexation nécessaire."
+                        )
+
+                        return {
+                            "filename": requested_filename,
+                            "requested_filename": requested_filename,
+                            "file": requested_filename,
+                            "chunk_count": existing_chunk_count,
+                            "document_id": existing_document_id,
+                            "already_indexed": True,
+                            "duplicate_content": False,
+                            "canonical_filename": requested_filename,
+                            "content_changed": False,
+                            "duplicate_file_deleted": False
+                        }
+
+                    print(
+                        f"[Indexer] "
+                        f"PostgreSQL ✓ | ChromaDB ✗"
+                    )
+
+                    print(
+                        f"[Indexer] "
+                        f"Index ChromaDB absent pour "
+                        f"{requested_filename}."
+                    )
+
+                    print(
+                        f"[Indexer] "
+                        f"Réindexation nécessaire."
+                    )
+
+                    filename = requested_filename
+
+                    content_changed = True
+
+                else:
+
+                    print(
+                        f"[Indexer] "
+                        f"PostgreSQL ✓ mais le hash a changé "
+                        f"pour {requested_filename}."
+                    )
+
+                    # On vérifie si le nouveau hash appartient
+                    # déjà à un autre document.
+                    hash_owner = (
+                        get_existing_document_by_hash(
+                            file_hash
+                        )
+                    )
+
+                    if (
+                        hash_owner is not None
+                        and hash_owner[0]
+                        != existing_document_id
+                    ):
+
+                        conflicting_filename = (
+                            hash_owner[1]
+                        )
+
+                        print(
+                            f"[Indexer] "
+                            f"Le nouveau contenu est identique "
+                            f"à {conflicting_filename}."
+                        )
+
+                        duplicate_file_deleted = (
+                            delete_duplicate_file(
+                                file_path=file_path,
+                                requested_filename=requested_filename,
+                                canonical_filename=conflicting_filename
+                            )
+                        )
+
+                        update_indexing_progress(
+                            filename=requested_filename,
+                            progress=100,
+                            status="completed",
+                            stage="completed",
+                            details=(
+                                f"Doublon supprimé. "
+                                f"Document canonique : "
+                                f"{conflicting_filename}."
+                            )
+                        )
+
+                        generation_progress[
+                            requested_filename
+                        ]["status"] = "completed"
+
+                        generation_progress[
+                            requested_filename
+                        ]["global_progress"] = 100
+
+                        return {
+                            "filename": conflicting_filename,
+                            "requested_filename": requested_filename,
+                            "file": conflicting_filename,
+                            "chunk_count": hash_owner[2],
+                            "document_id": hash_owner[0],
+                            "already_indexed": True,
+                            "duplicate_content": True,
+                            "canonical_filename": conflicting_filename,
+                            "content_changed": False,
+                            "duplicate_file_deleted": duplicate_file_deleted
+                        }
+
+                    print(
+                        f"[Indexer] "
+                        f"Réindexation complète nécessaire."
+                    )
+
+                    filename = requested_filename
+
+                    content_changed = True
+
+            # =================================================
+            # CAS 3 :
+            # DOCUMENT ABSENT DE POSTGRESQL
+            # =================================================
+
+            else:
+
+                print(
+                    f"[Indexer] "
+                    f"{requested_filename} absent de PostgreSQL."
+                )
+
+                chroma_indexed = is_file_indexed(
+                    requested_filename
+                )
+
+                if chroma_indexed:
+
+                    print(
+                        f"[Indexer] "
+                        f"PostgreSQL ✗ | ChromaDB ✓"
+                    )
+
+                    print(
+                        f"[Indexer] "
+                        f"Index ChromaDB trouvé pour "
+                        f"{requested_filename}."
+                    )
+
+                    print(
+                        f"[Indexer] "
+                        f"Synchronisation PostgreSQL nécessaire."
+                    )
+
+                else:
+
+                    print(
+                        f"[Indexer] "
+                        f"PostgreSQL ✗ | ChromaDB ✗"
+                    )
+
+                    print(
+                        f"[Indexer] "
+                        f"Nouveau document : "
+                        f"{requested_filename}"
+                    )
+
+                filename = requested_filename
+
+                content_changed = True
+
+        # ====================================================
+        # INDEXATION
+        # ====================================================
 
         task_manager.start_pdf_operation()
 
         try:
 
             update_indexing_progress(
-                filename=filename,
+                filename=requested_filename,
                 progress=15,
                 status="indexing",
                 stage="pdf",
@@ -766,7 +1198,7 @@ def index_pdf(
             )
 
             update_indexing_progress(
-                filename=filename,
+                filename=requested_filename,
                 progress=20,
                 status="indexing",
                 stage="chunks",
@@ -799,7 +1231,7 @@ def index_pdf(
             total_texts = len(texts)
 
             update_indexing_progress(
-                filename=filename,
+                filename=requested_filename,
                 progress=25,
                 status="indexing",
                 stage="embeddings",
@@ -883,7 +1315,7 @@ def index_pdf(
                     )
 
                 update_indexing_progress(
-                    filename=filename,
+                    filename=requested_filename,
                     progress=min(
                         70,
                         embedding_progress
@@ -916,7 +1348,7 @@ def index_pdf(
             )
 
             update_indexing_progress(
-                filename=filename,
+                filename=requested_filename,
                 progress=70,
                 status="indexing",
                 stage="chroma",
@@ -969,7 +1401,7 @@ def index_pdf(
             )
 
             update_indexing_progress(
-                filename=filename,
+                filename=requested_filename,
                 progress=85,
                 status="indexing",
                 stage="postgresql",
@@ -979,6 +1411,8 @@ def index_pdf(
             task_manager.wait_for_pdf_permission()
 
             connection = get_connection()
+
+            duplicate_file_deleted = False
 
             try:
 
@@ -1035,30 +1469,90 @@ def index_pdf(
 
                     else:
 
+                        # Sécurité supplémentaire :
+                        # le hash peut avoir été créé entre la
+                        # vérification précédente et maintenant.
                         cursor.execute(
                             """
-                            INSERT INTO documents (
+                            SELECT
+                                id,
                                 file_name,
-                                file_hash,
                                 chunk_count
-                            )
-                            VALUES (
-                                %s,
-                                %s,
-                                %s
-                            )
-                            RETURNING id
+                            FROM documents
+                            WHERE file_hash = %s
                             """,
-                            (
-                                filename,
-                                file_hash,
-                                len(chunks)
-                            )
+                            (file_hash,)
                         )
 
-                        document_id = (
-                            cursor.fetchone()[0]
-                        )
+                        hash_owner = cursor.fetchone()
+
+                        if hash_owner is not None:
+
+                            document_id = hash_owner[0]
+
+                            canonical_filename = (
+                                hash_owner[1]
+                            )
+
+                            print(
+                                f"[Indexer] "
+                                f"Le hash existe déjà sous "
+                                f"{canonical_filename}."
+                            )
+
+                            # Si on arrive ici, on utilise le
+                            # document canonique plutôt que de
+                            # créer une nouvelle ligne.
+                            filename = canonical_filename
+
+                            cursor.execute(
+                                """
+                                DELETE FROM document_chunks
+                                WHERE document_id = %s
+                                """,
+                                (document_id,)
+                            )
+
+                            cursor.execute(
+                                """
+                                UPDATE documents
+                                SET
+                                    chunk_count = %s,
+                                    created_at = CURRENT_TIMESTAMP
+                                WHERE id = %s
+                                """,
+                                (
+                                    len(chunks),
+                                    document_id
+                                )
+                            )
+
+                        else:
+
+                            cursor.execute(
+                                """
+                                INSERT INTO documents (
+                                    file_name,
+                                    file_hash,
+                                    chunk_count
+                                )
+                                VALUES (
+                                    %s,
+                                    %s,
+                                    %s
+                                )
+                                RETURNING id
+                                """,
+                                (
+                                    filename,
+                                    file_hash,
+                                    len(chunks)
+                                )
+                            )
+
+                            document_id = (
+                                cursor.fetchone()[0]
+                            )
 
                     for chunk_index in range(
                         len(chunks)
@@ -1106,19 +1600,53 @@ def index_pdf(
 
                 connection.close()
 
+            # =================================================
+            # SUPPRESSION PHYSIQUE DU DOUBLON
+            # =================================================
+            #
+            # Ce bloc intervient APRÈS l'indexation et la
+            # synchronisation PostgreSQL/ChromaDB.
+            #
+            # Le fichier demandé peut donc être supprimé
+            # uniquement lorsque le contenu canonique est
+            # correctement enregistré.
+            #
+            # On ne supprime jamais le fichier canonique.
+            # =================================================
+
+            if (
+                requested_filename != filename
+                and file_hash == calculate_file_hash(file_path)
+            ):
+
+                duplicate_file_deleted = (
+                    delete_duplicate_file(
+                        file_path=file_path,
+                        requested_filename=requested_filename,
+                        canonical_filename=filename
+                    )
+                )
+
             update_indexing_progress(
-                filename=filename,
+                filename=requested_filename,
                 progress=100,
                 status="completed",
                 stage="completed",
                 details=(
                     f"Indexation terminée : "
-                    f"{len(chunks)} chunks enregistrés."
+                    f"{len(chunks)} chunks enregistrés "
+                    f"sous {filename}."
+                    + (
+                        f" Doublon {requested_filename} "
+                        f"supprimé."
+                        if duplicate_file_deleted
+                        else ""
+                    )
                 )
             )
 
             generation_progress[
-                filename
+                requested_filename
             ]["status"] = "generating"
 
             print(
@@ -1133,6 +1661,14 @@ def index_pdf(
                 f"document_chunks pour {filename}"
             )
 
+            if duplicate_file_deleted:
+
+                print(
+                    f"[Indexer] "
+                    f"Doublon physique supprimé : "
+                    f"{requested_filename}"
+                )
+
             print(
                 f"[Indexer] "
                 f"Indexation terminée : {filename}"
@@ -1140,11 +1676,17 @@ def index_pdf(
 
             return {
                 "filename": filename,
+                "requested_filename": requested_filename,
                 "file": filename,
                 "chunk_count": len(chunks),
                 "document_id": document_id,
                 "already_indexed": False,
-                "content_changed": content_changed
+                "duplicate_content": (
+                    filename != requested_filename
+                ),
+                "canonical_filename": filename,
+                "content_changed": content_changed,
+                "duplicate_file_deleted": duplicate_file_deleted
             }
 
         finally:
@@ -1155,18 +1697,18 @@ def index_pdf(
 
         print(
             f"[Indexer] "
-            f"Erreur indexation {filename} : {error}"
+            f"Erreur indexation {requested_filename} : {error}"
         )
 
-        if filename not in generation_progress:
+        if requested_filename not in generation_progress:
             initialize_progress(
-                filename
+                requested_filename
             )
 
         update_indexing_progress(
-            filename=filename,
+            filename=requested_filename,
             progress=generation_progress[
-                filename
+                requested_filename
             ].get(
                 "indexing_progress",
                 0
@@ -1177,7 +1719,7 @@ def index_pdf(
         )
 
         generation_progress[
-            filename
+            requested_filename
         ]["status"] = "error"
 
         raise
