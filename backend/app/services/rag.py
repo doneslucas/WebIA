@@ -1,3 +1,4 @@
+import json
 import os
 
 from dotenv import load_dotenv
@@ -9,30 +10,26 @@ from app.services.chroma import search_chunks
 load_dotenv()
 
 
-# -------------------------------------------------
-# Configuration Ollama
-# -------------------------------------------------
+OLLAMA_HOST = os.getenv(
+    "OLLAMA_HOST",
+    "localhost"
+)
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "localhost")
-OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
+OLLAMA_PORT = os.getenv(
+    "OLLAMA_PORT",
+    "11434"
+)
 
-OLLAMA_BASE_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
+OLLAMA_BASE_URL = (
+    f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
+)
 
-
-# -------------------------------------------------
-# Modèle utilisé pour transformer les questions
-# en vecteurs
-# -------------------------------------------------
 
 embeddings = OllamaEmbeddings(
     model="nomic-embed-text",
     base_url=OLLAMA_BASE_URL
 )
 
-
-# -------------------------------------------------
-# Modèle utilisé pour générer les réponses
-# -------------------------------------------------
 
 llm = OllamaLLM(
     model="qwen2.5:7b",
@@ -43,58 +40,76 @@ llm = OllamaLLM(
 
 def ask_rag(question: str):
 
-    # ---------------------------------------------
-    # 1. Transformer la question en vecteur
-    # ---------------------------------------------
+    # --------------------------------------------------------
+    # 1. Transformation de la question en vecteur
+    # --------------------------------------------------------
 
-    query_vector = embeddings.embed_query(question)
+    query_vector = embeddings.embed_query(
+        question
+    )
 
-
-    # ---------------------------------------------
-    # 2. Rechercher les chunks pertinents
-    # ---------------------------------------------
+    # --------------------------------------------------------
+    # 2. Recherche des chunks les plus proches
+    # --------------------------------------------------------
 
     results = search_chunks(
         query_vector,
         n_results=5
     )
 
+    documents = results.get(
+        "documents",
+        [[]]
+    )
 
-    # ---------------------------------------------
-    # 3. Récupérer les documents et leurs sources
-    # ---------------------------------------------
+    metadatas = results.get(
+        "metadatas",
+        [[]]
+    )
 
-    chunks = results["documents"][0]
-    metadatas = results["metadatas"][0]
+    chunks = (
+        documents[0]
+        if documents and documents[0]
+        else []
+    )
 
+    chunk_metadatas = (
+        metadatas[0]
+        if metadatas and metadatas[0]
+        else []
+    )
 
-    # ---------------------------------------------
-    # 4. Construire le contexte
-    # ---------------------------------------------
+    # --------------------------------------------------------
+    # 3. Vérification qu'il existe bien du contenu
+    # --------------------------------------------------------
 
-    context = "\n\n".join(chunks)
+    if not chunks:
 
+        return {
+            "answer": (
+                "Je ne peux pas répondre à cette question "
+                "à partir des documents fournis."
+            ),
+            "sources": []
+        }
 
-    # ---------------------------------------------
-    # 5. Construire le prompt
-    # ---------------------------------------------
+    # --------------------------------------------------------
+    # 4. Construction du contexte
+    # --------------------------------------------------------
+
+    context = "\n\n".join(
+        chunks
+    )
+
+    # --------------------------------------------------------
+    # 5. Prompt RAG
+    # --------------------------------------------------------
 
     prompt = f"""
 Tu es un assistant spécialisé en cybersécurité.
 
-Tu dois répondre UNIQUEMENT avec les informations présentes dans le CONTEXTE.
-
-RÈGLES STRICTES :
-- Réponds uniquement en français.
-- N'utilise aucune connaissance extérieure au contexte.
-- N'invente aucune information.
-- Si la réponse à la question n'est pas clairement présente dans le contexte,
-  réponds exactement :
-  "Je ne trouve pas cette information dans les documents disponibles."
-- Ne complète pas les informations manquantes avec tes connaissances générales.
-- Réponds de manière concise mais complète.
-- Ne répète pas les informations.
-- Termine toujours ta réponse correctement.
+Tu dois répondre à la question UNIQUEMENT à partir
+du contenu des documents fourni dans CONTEXTE.
 
 CONTEXTE :
 {context}
@@ -102,38 +117,102 @@ CONTEXTE :
 QUESTION :
 {question}
 
-RÉPONSE :
+RÈGLES ABSOLUES :
+
+1. Utilise uniquement les informations présentes dans CONTEXTE.
+
+2. Si CONTEXTE contient suffisamment d'informations
+   pour répondre à la question, réponds normalement.
+
+3. Si CONTEXTE ne contient pas la réponse, ou si les
+   informations sont insuffisantes pour répondre de
+   manière fiable, réponds exactement :
+
+Je ne peux pas répondre à cette question à partir des documents fournis.
+
+4. Dans ce dernier cas, n'invente aucune information.
+
+5. Ne déduis pas une réponse qui n'est pas justifiable
+   par CONTEXTE.
+
+6. Ne donne pas de connaissances générales extérieures
+   aux documents.
+
+Réponds uniquement avec la réponse finale destinée à
+l'utilisateur.
 """
 
+    # --------------------------------------------------------
+    # 6. Génération de la réponse
+    # --------------------------------------------------------
 
-    # ---------------------------------------------
-    # 6. Générer la réponse
-    # ---------------------------------------------
+    response = llm.invoke(
+        prompt
+    )
 
-    response = llm.invoke(prompt)
+    answer = str(
+        response
+    ).strip()
 
+    # --------------------------------------------------------
+    # 7. Détection d'une absence de réponse dans les documents
+    # --------------------------------------------------------
 
-    # ---------------------------------------------
-    # 7. Préparer les sources
-    # ---------------------------------------------
+    no_answer_message = (
+        "Je ne peux pas répondre à cette question "
+        "à partir des documents fournis."
+    )
+
+    normalized_answer = (
+        " ".join(
+            answer.lower().split()
+        )
+    )
+
+    normalized_no_answer = (
+        " ".join(
+            no_answer_message.lower().split()
+        )
+    )
+
+    if (
+        normalized_answer
+        == normalized_no_answer
+    ):
+
+        return {
+            "answer": no_answer_message,
+            "sources": []
+        }
+
+    # --------------------------------------------------------
+    # 8. Les sources ne sont retournées que si une réponse
+    #    a réellement été trouvée dans les documents
+    # --------------------------------------------------------
 
     sources = []
 
-    for metadata in metadatas:
+    for metadata in chunk_metadatas:
 
-        source = {
-            "file": metadata.get("source"),
-            "page": metadata.get("page")
-        }
+        if not metadata:
+            continue
 
-        sources.append(source)
+        sources.append(
+            {
+                "file": metadata.get(
+                    "source"
+                ),
+                "page": metadata.get(
+                    "page"
+                )
+            }
+        )
 
-
-    # ---------------------------------------------
-    # 8. Retourner réponse + sources
-    # ---------------------------------------------
+    # --------------------------------------------------------
+    # 9. Réponse finale
+    # --------------------------------------------------------
 
     return {
-        "answer": response,
+        "answer": answer,
         "sources": sources
     }

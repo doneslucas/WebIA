@@ -1309,7 +1309,6 @@ def generate_questions_for_bank(
 
     return generated_count
 
-
 def get_random_questions(
     document: str,
     difficulty: str,
@@ -1340,6 +1339,7 @@ def get_random_questions(
                         qq.id,
                         qq.question,
                         qq.options,
+                        qq.correct_answer,
                         qq.difficulty
                     FROM quiz_questions qq
 
@@ -1370,6 +1370,7 @@ def get_random_questions(
                         qq.id,
                         qq.question,
                         qq.options,
+                        qq.correct_answer,
                         qq.difficulty
                     FROM quiz_questions qq
 
@@ -1396,28 +1397,133 @@ def get_random_questions(
 
     for row in rows:
 
+        question_id = row[0]
+        question_text = row[1]
         options = row[2]
+        correct_answer = row[3]
+        row_difficulty = row[4]
 
         if isinstance(
             options,
             str
         ):
 
-            options = json.loads(
-                options
+            try:
+
+                options = json.loads(
+                    options
+                )
+
+            except json.JSONDecodeError:
+
+                print(
+                    f"[QUIZ] Question {question_id} ignorée : "
+                    f"options JSON invalides."
+                )
+
+                continue
+
+        if not isinstance(
+            options,
+            list
+        ):
+
+            print(
+                f"[QUIZ] Question {question_id} ignorée : "
+                f"les options ne sont pas une liste."
             )
+
+            continue
+
+        if len(options) != 4:
+
+            print(
+                f"[QUIZ] Question {question_id} ignorée : "
+                f"{len(options)} options trouvées au lieu de 4."
+            )
+
+            continue
+
+        if not all(
+            isinstance(option, str)
+            and option.strip()
+            for option in options
+        ):
+
+            print(
+                f"[QUIZ] Question {question_id} ignorée : "
+                f"une ou plusieurs options sont invalides."
+            )
+
+            continue
+
+        normalized_options = [
+            normalize_question(option)
+            for option in options
+        ]
+
+        if len(
+            set(normalized_options)
+        ) != 4:
+
+            print(
+                f"[QUIZ] Question {question_id} ignorée : "
+                f"les 4 options ne sont pas différentes."
+            )
+
+            continue
+
+        try:
+
+            correct_answer = int(
+                correct_answer
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            print(
+                f"[QUIZ] Question {question_id} ignorée : "
+                f"correct_answer invalide."
+            )
+
+            continue
+
+        if correct_answer not in {
+            0,
+            1,
+            2,
+            3
+        }:
+
+            print(
+                f"[QUIZ] Question {question_id} ignorée : "
+                f"correct_answer={correct_answer} invalide."
+            )
+
+            continue
 
         questions.append(
             {
-                "id": row[0],
-                "question": row[1],
+                "id": question_id,
+                "question": question_text,
                 "options": options,
-                "difficulty": row[3]
+                "correct_answer": correct_answer,
+                "difficulty": row_difficulty
             }
         )
 
-    return questions
+    if len(questions) < question_count:
 
+        raise ValueError(
+            "Impossible de constituer un quiz avec "
+            f"{question_count} questions valides à 4 options. "
+            f"{len(questions)} question(s) valide(s) seulement."
+        )
+
+    return questions
 
 def get_mixed_quiz_questions(
     document: str,

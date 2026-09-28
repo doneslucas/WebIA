@@ -1,281 +1,1290 @@
-import threading
+import json
+import re
 
-from app.services.indexer import (
-    get_all_documents,
-    QUIZ_DIFFICULTIES,
+from langchain_ollama import OllamaEmbeddings, OllamaLLM
+
+from app.database.connection import get_connection
+from app.services.chroma import collection
+
+
+CRITICAL_THRESHOLD = 20
+GENERATION_THRESHOLD = 35
+TARGET_QUESTION_COUNT = 50
+QUESTION_LIMIT_PER_CHUNK = 5
+
+BATCH_SIZE = 2
+MAX_ATTEMPTS = 10
+MAX_EMPTY_PASSES = 3
+
+QUIZ_NUM_PREDICT = 1000
+
+
+embeddings = OllamaEmbeddings(
+    model="nomic-embed-text"
 )
 
-from app.services.quiz import (
-    GENERATION_THRESHOLD,
-    TARGET_QUESTION_COUNT,
-    count_questions,
-    get_max_capacity,
-    generate_questions_for_bank,
-    generation_lock,
-    active_generations,
+llm = OllamaLLM(
+    model="llama3.2:latest",
+    num_predict=QUIZ_NUM_PREDICT,
+    format="json",
+    temperature=0.2
 )
 
-from app.services.task_manager import task_manager
+
+def normalize_question(question: str) -> str:
+    return re.sub(
+        r"\s+",
+        " ",
+        question.strip().lower()
+    )
 
 
-class QuestionBankManager:
+def clean_json_response(response: str) -> str:
+    response = response.strip()
+
+    if response.startswith("```"):
+        response = re.sub(
+            r"^```(?:json)?\s*",
+            "",
+            response,
+            flags=re.IGNORECASE
+        )
+
+        response = re.sub(
+            r"\s*```$",
+            "",
+            response
+        )
+
+    start = response.find("{")
+    end = response.rfind("}")
+
+    if start == -1 or end == -1:
+        raise ValueError(
+            "La réponse du LLM ne contient pas de JSON valide."
+        )
+
+    return response[start:end + 1]
+
+
+def validate_quiz(data):
+    if not isinstance(data, dict):
+        return False
+
+    questions = data.get("questions")
+
+    if not isinstance(questions, list):
+        return False
+
+    if not questions:
+        return False
+
+    for question in questions:
+
+        if not isinstance(question, dict):
+            return False
+
+        question_text = question.get("question")
+
+        if not isinstance(
+            question_text,
+            str
+        ):
+            return False
+
+        if not question_text.strip():
+            return False
+
+        options = question.get("options")
+
+        if not isinstance(
+            options,
+            list
+        ):
+            return False
+
+        if len(options) != 4:
+            return False
+
+        if not all(
+            isinstance(option, str)
+            and option.strip()
+            for option in options
+        ):
+            return False
+
+        normalized_options = [
+            normalize_question(option)
+            for option in options
+        ]
+
+        if len(
+            set(normalized_options)
+        ) != 4:
+            return False
+
+        correct_answer = question.get(
+            "correct_answer"
+        )
+
+        if not isinstance(
+            correct_answer,
+            int
+        ):
+            return False
+
+        if correct_answer not in {
+            0,
+            1,
+            2,
+            3
+        }:
+            return False
+
+        explanation = question.get(
+            "explanation"
+        )
+
+        if not isinstance(
+            explanation,
+            str
+        ):
+            return False
+
+        if not explanation.strip():
+            return False
+
+    return True
+
+
+def parse_quiz_response(response: str):
+    cleaned_response = clean_json_response(
+        response
+    )
+
+    try:
+
+        data = json.loads(
+            cleaned_response
+        )
+
+    except json.JSONDecodeError as error:
+
+        raise ValueError(
+            f"JSON invalide retourné par le LLM : {error}"
+        )
+
+    if not validate_quiz(data):
+
+        raise ValueError(
+            "Le format du quiz généré est invalide."
+        )
+
+    return data["questions"]
+
+
+def get_documents_scope(
+    document: str
+):
+    document_ids = None
+
+    if document == "all":
+
+        with get_connection() as conn:
+
+            with conn.cursor() as cursor:
+
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM documents
+                    ORDER BY id
+                    """
+                )
+
+                rows = cursor.fetchall()
+
+        document_ids = [
+            row[0]
+            for row in rows
+        ]
+
+    else:
+
+        with get_connection() as conn:
+
+            with conn.cursor() as cursor:
+
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM documents
+                    WHERE file_name = %s
+                    """,
+                    (document,)
+                )
+
+                result = cursor.fetchone()
+
+        if result is None:
+
+            raise ValueError(
+                f"Document introuvable : {document}"
+            )
+
+        document_ids = [
+            result[0]
+        ]
+
+    return document_ids
+
+
+def get_available_chunks(
+    document: str,
+    difficulty: str
+):
     """
-    Gestionnaire automatique des banques de questions.
+    Retourne les chunks qui peuvent encore recevoir
+    des questions pour la difficulté demandée.
 
-    Fonctionnement :
-    - Vérifie régulièrement toutes les banques de questions.
-    - Si une banque contient moins de GENERATION_THRESHOLD questions,
-      une génération automatique est lancée.
-    - La génération vise TARGET_QUESTION_COUNT questions.
-    - La génération respecte la priorité 3 du TaskManager.
-    - Une seule génération peut être active pour un couple
-      (document, difficulté).
+    La limite de 5 questions est indépendante
+    pour chaque difficulté.
     """
 
-    CHECK_INTERVAL = 60
+    document_ids = get_documents_scope(
+        document
+    )
 
-    def __init__(self):
-        self._stop_event = threading.Event()
-        self._thread = None
+    with get_connection() as conn:
 
-    def start(self):
-        if self._thread is not None and self._thread.is_alive():
-            print(
-                "[QuestionBankManager] "
-                "Le manager est déjà démarré."
-            )
-            return
+        with conn.cursor() as cursor:
 
-        self._stop_event.clear()
+            cursor.execute(
+                """
+                SELECT
+                    dc.id,
+                    dc.chroma_id,
+                    COUNT(qq.id) AS difficulty_count
+                FROM document_chunks dc
 
-        self._thread = threading.Thread(
-            target=self._monitor_loop,
-            name="QuestionBankManager",
-            daemon=True
-        )
+                LEFT JOIN quiz_questions qq
+                    ON qq.chunk_id = dc.id
+                    AND qq.difficulty = %s
 
-        self._thread.start()
+                WHERE dc.document_id = ANY(%s)
 
-        print(
-            "[QuestionBankManager] "
-            "Manager démarré."
-        )
+                GROUP BY
+                    dc.id,
+                    dc.chroma_id
 
-    def stop(self):
-        print(
-            "[QuestionBankManager] "
-            "Arrêt du manager demandé."
-        )
+                HAVING COUNT(qq.id) < %s
 
-        self._stop_event.set()
-
-        if self._thread is not None:
-            self._thread.join(
-                timeout=self.CHECK_INTERVAL + 5
-            )
-
-        self._thread = None
-
-        print(
-            "[QuestionBankManager] "
-            "Manager arrêté."
-        )
-
-    def _monitor_loop(self):
-        print(
-            "[QuestionBankManager] "
-            "Boucle de surveillance démarrée."
-        )
-
-        while not self._stop_event.is_set():
-
-            try:
-                self.check_all_banks()
-
-            except Exception as error:
-                print(
-                    "[QuestionBankManager] "
-                    f"Erreur pendant la surveillance : {error}"
+                ORDER BY dc.id
+                """,
+                (
+                    difficulty,
+                    document_ids,
+                    QUESTION_LIMIT_PER_CHUNK
                 )
-
-            self._stop_event.wait(
-                self.CHECK_INTERVAL
             )
 
-        print(
-            "[QuestionBankManager] "
-            "Boucle de surveillance terminée."
+            return cursor.fetchall()
+
+
+def count_questions(
+    document: str,
+    difficulty: str
+):
+    document_ids = get_documents_scope(
+        document
+    )
+
+    with get_connection() as conn:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM quiz_questions qq
+
+                JOIN document_chunks dc
+                    ON qq.chunk_id = dc.id
+
+                WHERE dc.document_id = ANY(%s)
+                  AND qq.difficulty = %s
+                """,
+                (
+                    document_ids,
+                    difficulty
+                )
+            )
+
+            return cursor.fetchone()[0]
+
+
+def get_max_capacity(
+    document: str
+):
+    """
+    Capacité maximale pour une difficulté.
+    """
+
+    document_ids = get_documents_scope(
+        document
+    )
+
+    with get_connection() as conn:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT COALESCE(
+                    SUM(question_limit),
+                    0
+                )
+                FROM document_chunks
+                WHERE document_id = ANY(%s)
+                """,
+                (document_ids,)
+            )
+
+            return cursor.fetchone()[0]
+
+
+def get_existing_questions(
+    document: str
+):
+    """
+    Retourne toutes les questions existantes du document,
+    quelle que soit leur difficulté.
+
+    C'est volontaire : une question déjà utilisée en easy
+    ne doit pas pouvoir être régénérée en medium ou hard.
+    """
+
+    document_ids = get_documents_scope(
+        document
+    )
+
+    with get_connection() as conn:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT
+                    qq.id,
+                    qq.question,
+                    qq.difficulty
+                FROM quiz_questions qq
+
+                JOIN document_chunks dc
+                    ON qq.chunk_id = dc.id
+
+                WHERE dc.document_id = ANY(%s)
+                """,
+                (document_ids,)
+            )
+
+            return cursor.fetchall()
+
+
+def get_user_seen_question_ids(
+    user_id: int,
+    document: str,
+    difficulty: str
+):
+    document_ids = get_documents_scope(
+        document
+    )
+
+    with get_connection() as conn:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT DISTINCT qaq.question_id
+
+                FROM quiz_attempt_questions qaq
+
+                JOIN quiz_results qr
+                    ON qaq.quiz_result_id = qr.id
+
+                JOIN quiz_questions qq
+                    ON qaq.question_id = qq.id
+
+                JOIN document_chunks dc
+                    ON qq.chunk_id = dc.id
+
+                WHERE qr.user_id = %s
+                  AND dc.document_id = ANY(%s)
+                  AND qq.difficulty = %s
+                """,
+                (
+                    user_id,
+                    document_ids,
+                    difficulty
+                )
+            )
+
+            return {
+                row[0]
+                for row in cursor.fetchall()
+            }
+
+
+def get_chunk_context(
+    chroma_id: str
+):
+    result = collection.get(
+        ids=[chroma_id],
+        include=["documents"]
+    )
+
+    documents = result.get(
+        "documents",
+        []
+    )
+
+    if not documents:
+
+        raise ValueError(
+            f"Chunk introuvable dans ChromaDB : {chroma_id}"
         )
 
-    def check_all_banks(self):
-        documents = get_all_documents()
+    context = documents[0]
 
-        if not documents:
-            print(
-                "[QuestionBankManager] "
-                "Aucun document à surveiller."
-            )
-            return
-
-        for document_info in documents:
-
-            if self._stop_event.is_set():
-                return
-
-            # get_all_documents() retourne la clé "file"
-            document = document_info.get(
-                "file"
-            )
-
-            if not document:
-                continue
-
-            for difficulty in QUIZ_DIFFICULTIES:
-
-                if self._stop_event.is_set():
-                    return
-
-                self._check_bank(
-                    document=document,
-                    difficulty=difficulty
-                )
-
-    def _check_bank(
-        self,
-        document: str,
-        difficulty: str
+    if not isinstance(
+        context,
+        str
     ):
-        current_count = count_questions(
-            document=document,
-            difficulty=difficulty
+        raise ValueError(
+            "Le contenu du chunk est invalide."
         )
 
-        max_capacity = get_max_capacity(
-            document
+    if not context.strip():
+        raise ValueError(
+            "Le chunk ne contient aucun texte."
         )
 
-        if max_capacity <= 0:
-            return
+    return context
 
-        target_count = min(
-            TARGET_QUESTION_COUNT,
-            max_capacity
+
+def build_excluded_questions(
+    document: str
+):
+    """
+    Construit la liste des questions interdites
+    pour tout le document, toutes difficultés confondues.
+    """
+
+    existing_questions = get_existing_questions(
+        document
+    )
+
+    return {
+        normalize_question(
+            question[1]
         )
+        for question in existing_questions
+    }
 
-        print(
-            "[QuestionBankManager] "
-            f"{document} / {difficulty} : "
-            f"{current_count}/{target_count}"
-        )
 
-        if current_count >= GENERATION_THRESHOLD:
-            return
-
-        if current_count >= target_count:
-            return
-
-        generation_key = (
-            document,
-            difficulty
-        )
-
-        with generation_lock:
-
-            if generation_key in active_generations:
-                print(
-                    "[QuestionBankManager] "
-                    f"Génération déjà active pour "
-                    f"{document} / {difficulty}."
-                )
-                return
-
-            active_generations.add(
-                generation_key
-            )
-
-        print(
-            "[QuestionBankManager] "
-            f"Seuil atteint pour "
-            f"{document} / {difficulty} : "
-            f"{current_count} < {GENERATION_THRESHOLD}."
-        )
-
-        thread = threading.Thread(
-            target=self._generate_bank,
-            args=(
-                document,
-                difficulty,
-                target_count,
-                generation_key
-            ),
-            name=(
-                f"QuestionGeneration-"
-                f"{document}-"
-                f"{difficulty}"
-            ),
-            daemon=True
-        )
-
-        thread.start()
-
-    def _generate_bank(
-        self,
-        document: str,
-        difficulty: str,
-        target_count: int,
-        generation_key
+def is_valid_generated_question(
+    question
+):
+    if not isinstance(
+        question,
+        dict
     ):
+        return False
+
+    question_text = question.get(
+        "question"
+    )
+
+    if not isinstance(
+        question_text,
+        str
+    ):
+        return False
+
+    if not question_text.strip():
+        return False
+
+    options = question.get(
+        "options"
+    )
+
+    if not isinstance(
+        options,
+        list
+    ):
+        return False
+
+    if len(options) != 4:
+        return False
+
+    if not all(
+        isinstance(option, str)
+        and option.strip()
+        for option in options
+    ):
+        return False
+
+    normalized_options = [
+        normalize_question(option)
+        for option in options
+    ]
+
+    if len(
+        set(normalized_options)
+    ) != 4:
+        return False
+
+    correct_answer = question.get(
+        "correct_answer"
+    )
+
+    if not isinstance(
+        correct_answer,
+        int
+    ):
+        return False
+
+    if correct_answer not in {
+        0,
+        1,
+        2,
+        3
+    }:
+        return False
+
+    explanation = question.get(
+        "explanation"
+    )
+
+    if not isinstance(
+        explanation,
+        str
+    ):
+        return False
+
+    if not explanation.strip():
+        return False
+
+    return True
+
+
+def generate_quiz_batch(
+    context: str,
+    difficulty: str,
+    excluded_questions: set[str],
+    batch_size: int = BATCH_SIZE
+):
+    prompt = f"""
+Tu es un expert en cybersécurité chargé de créer
+des questions à choix multiple.
+
+CONTENU SOURCE :
+{context}
+
+DIFFICULTÉ :
+{difficulty}
+
+NOMBRE DE QUESTIONS :
+{batch_size}
+
+Tu dois générer exactement {batch_size} question(s).
+
+FORMAT OBLIGATOIRE :
+
+{{
+  "questions": [
+    {{
+      "question": "Question...",
+      "options": [
+        "Réponse A",
+        "Réponse B",
+        "Réponse C",
+        "Réponse D"
+      ],
+      "correct_answer": 0,
+      "explanation": "Explication..."
+    }}
+  ]
+}}
+
+RÈGLES ABSOLUES :
+
+1. Retourne uniquement du JSON.
+2. N'utilise jamais de Markdown.
+3. Ne mets jamais le JSON dans ```json.
+4. "questions" doit être une liste.
+5. Chaque question doit contenir exactement 4 options.
+6. Les 4 options doivent être différentes.
+7. "correct_answer" doit être un entier : 0, 1, 2 ou 3.
+8. L'option située à l'index correct_answer doit être la seule bonne réponse.
+9. "explanation" doit expliquer clairement la bonne réponse.
+10. Les questions doivent être basées uniquement sur le contenu source fourni.
+11. Ne crée aucune information absente du contenu source.
+12. La difficulté demandée doit être respectée.
+13. Les questions doivent être réellement différentes entre elles.
+14. Ne reformule pas simplement la même question.
+15. Les options doivent être cohérentes avec la question.
+16. La question et ses options doivent être rédigées dans la même langue que le contenu source.
+17. Si la question demande un terme anglais, une option doit réellement contenir ce terme anglais.
+18. Ne mets jamais une réponse qui contredit directement la question.
+19. Ne mets jamais plusieurs réponses correctes.
+20. Ne mets jamais une option vide.
+
+QUESTIONS DÉJÀ UTILISÉES :
+
+{json.dumps(
+    list(excluded_questions),
+    ensure_ascii=False
+)}
+
+Ces questions sont interdites.
+
+IMPORTANT :
+
+Même si le contenu source semble court,
+produis uniquement des questions dont la réponse
+est réellement justifiable par ce contenu.
+
+Retourne uniquement l'objet JSON final.
+"""
+
+    last_error = None
+
+    for attempt in range(
+        1,
+        MAX_ATTEMPTS + 1
+    ):
+
         try:
 
-            print(
-                "[QuestionBankManager] "
-                f"Génération démarrée : "
-                f"{document} / {difficulty} "
-                f"→ objectif {target_count}."
+            response = llm.invoke(
+                prompt
             )
 
-            task_manager.wait_for_background_permission()
-
-            generate_questions_for_bank(
-                document=document,
-                difficulty=difficulty,
-                target_count=target_count,
-                background=True
+            questions = parse_quiz_response(
+                response
             )
 
-            final_count = count_questions(
-                document=document,
-                difficulty=difficulty
+            valid_questions = []
+
+            local_questions = set(
+                excluded_questions
             )
 
-            print(
-                "[QuestionBankManager] "
-                f"Génération terminée : "
-                f"{document} / {difficulty} "
-                f"= {final_count} questions."
+            for question in questions:
+
+                if not is_valid_generated_question(
+                    question
+                ):
+                    continue
+
+                normalized = normalize_question(
+                    question["question"]
+                )
+
+                if normalized in local_questions:
+                    continue
+
+                local_questions.add(
+                    normalized
+                )
+
+                valid_questions.append(
+                    question
+                )
+
+                if len(
+                    valid_questions
+                ) >= batch_size:
+                    break
+
+            if valid_questions:
+
+                return valid_questions
+
+            last_error = (
+                "Le LLM a retourné des questions "
+                "mais aucune n'était exploitable."
             )
 
         except Exception as error:
 
+            last_error = str(
+                error
+            )
+
             print(
-                "[QuestionBankManager] "
-                f"Erreur de génération pour "
-                f"{document} / {difficulty} : "
+                f"Erreur génération quiz "
+                f"(tentative {attempt}/{MAX_ATTEMPTS}) : "
                 f"{error}"
             )
 
-        finally:
+    raise ValueError(
+        "Impossible de générer un lot de questions valide."
+        + (
+            f" Dernière erreur : {last_error}"
+            if last_error
+            else ""
+        )
+    )
 
-            with generation_lock:
-                active_generations.discard(
-                    generation_key
+
+def save_questions(
+    chunk_id: int,
+    questions,
+    difficulty: str
+):
+    saved_questions = []
+
+    with get_connection() as conn:
+
+        with conn.cursor() as cursor:
+
+            for question in questions:
+
+                normalized = normalize_question(
+                    question["question"]
                 )
 
+                # Vérification globale :
+                # une question identique ne doit exister
+                # dans aucun niveau de difficulté pour ce document.
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM quiz_questions qq
+                    JOIN document_chunks dc
+                        ON qq.chunk_id = dc.id
+                    JOIN documents d
+                        ON dc.document_id = d.id
+                    WHERE d.id = (
+                        SELECT document_id
+                        FROM document_chunks
+                        WHERE id = %s
+                    )
+                    AND LOWER(
+                        REGEXP_REPLACE(
+                            TRIM(qq.question),
+                            '\\s+',
+                            ' ',
+                            'g'
+                        )
+                    ) = %s
+                    LIMIT 1
+                    """,
+                    (
+                        chunk_id,
+                        normalized
+                    )
+                )
+
+                if cursor.fetchone() is not None:
+                    continue
+
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM quiz_questions
+                    WHERE chunk_id = %s
+                      AND difficulty = %s
+                    """,
+                    (
+                        chunk_id,
+                        difficulty
+                    )
+                )
+
+                current_count = (
+                    cursor.fetchone()[0]
+                )
+
+                if (
+                    current_count
+                    >= QUESTION_LIMIT_PER_CHUNK
+                ):
+                    continue
+
+                cursor.execute(
+                    """
+                    INSERT INTO quiz_questions (
+                        chunk_id,
+                        question,
+                        options,
+                        correct_answer,
+                        explanation,
+                        difficulty
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        chunk_id,
+                        question["question"],
+                        json.dumps(
+                            question["options"],
+                            ensure_ascii=False
+                        ),
+                        str(
+                            question["correct_answer"]
+                        ),
+                        question["explanation"],
+                        difficulty
+                    )
+                )
+
+                question_id = (
+                    cursor.fetchone()[0]
+                )
+
+                saved_questions.append(
+                    {
+                        "id": question_id,
+                        "question": question["question"],
+                        "options": question["options"],
+                        "correct_answer": question["correct_answer"],
+                        "explanation": question["explanation"],
+                        "difficulty": difficulty
+                    }
+                )
+
+            conn.commit()
+
+    return saved_questions
+
+
+def generate_questions_for_bank(
+    document: str,
+    difficulty: str,
+    target_count: int
+):
+    """
+    Génère progressivement la banque d'une difficulté.
+
+    Un échec du LLM sur un chunk ne bloque pas
+    les autres chunks.
+
+    Les lots peuvent être partiels.
+
+    La génération s'arrête uniquement lorsqu'il n'existe
+    plus de capacité disponible ou lorsque plusieurs
+    passages complets n'ont produit aucune nouvelle
+    question.
+    """
+
+    generated_count = count_questions(
+        document,
+        difficulty
+    )
+
+    print(
+        f"[{difficulty.upper()}] "
+        f"Banque actuelle : "
+        f"{generated_count}/{target_count}"
+    )
+
+    empty_passes = 0
+
+    while generated_count < target_count:
+
+        chunks = get_available_chunks(
+            document,
+            difficulty
+        )
+
+        if not chunks:
+
             print(
-                "[QuestionBankManager] "
-                f"Génération libérée : "
-                f"{document} / {difficulty}."
+                f"[{difficulty.upper()}] "
+                f"Aucun chunk disponible."
             )
+
+            break
+
+        generated_in_pass = False
+
+        for chunk in chunks:
+
+            if generated_count >= target_count:
+                break
+
+            chunk_id = chunk[0]
+            chroma_id = chunk[1]
+            difficulty_count = chunk[2]
+
+            remaining_capacity = (
+                QUESTION_LIMIT_PER_CHUNK
+                - difficulty_count
+            )
+
+            if remaining_capacity <= 0:
+                continue
+
+            batch_size = min(
+                BATCH_SIZE,
+                remaining_capacity,
+                target_count - generated_count
+            )
+
+            try:
+
+                context = get_chunk_context(
+                    chroma_id
+                )
+
+                excluded_questions = (
+                    build_excluded_questions(
+                        document
+                    )
+                )
+
+                questions = generate_quiz_batch(
+                    context=context,
+                    difficulty=difficulty,
+                    excluded_questions=excluded_questions,
+                    batch_size=batch_size
+                )
+
+                questions = questions[
+                    :batch_size
+                ]
+
+                saved_questions = save_questions(
+                    chunk_id=chunk_id,
+                    questions=questions,
+                    difficulty=difficulty
+                )
+
+                if saved_questions:
+
+                    generated_count += len(
+                        saved_questions
+                    )
+
+                    generated_in_pass = True
+
+                    print(
+                        f"[{difficulty.upper()}] "
+                        f"+{len(saved_questions)} "
+                        f"questions "
+                        f"→ {generated_count}/{target_count}"
+                    )
+
+            except Exception as error:
+
+                print(
+                    f"[{difficulty.upper()}] "
+                    f"Chunk {chunk_id} ignoré : "
+                    f"{error}"
+                )
+
+                continue
+
+        if generated_in_pass:
+
+            empty_passes = 0
+
+        else:
+
+            empty_passes += 1
+
+            print(
+                f"[{difficulty.upper()}] "
+                f"Aucune nouvelle question "
+                f"pendant ce passage "
+                f"({empty_passes}/{MAX_EMPTY_PASSES})."
+            )
+
+            if empty_passes >= MAX_EMPTY_PASSES:
+
+                print(
+                    f"[{difficulty.upper()}] "
+                    f"Arrêt de sécurité : "
+                    f"aucune progression après "
+                    f"{MAX_EMPTY_PASSES} passages."
+                )
+
+                break
+
+    print(
+        f"[{difficulty.upper()}] "
+        f"Banque terminée : "
+        f"{generated_count} questions"
+    )
+
+    return generated_count
+
+
+def get_random_questions(
+    document: str,
+    difficulty: str,
+    question_count: int,
+    user_id: int
+):
+    document_ids = get_documents_scope(
+        document
+    )
+
+    seen_question_ids = (
+        get_user_seen_question_ids(
+            user_id=user_id,
+            document=document,
+            difficulty=difficulty
+        )
+    )
+
+    with get_connection() as conn:
+
+        with conn.cursor() as cursor:
+
+            if seen_question_ids:
+
+                cursor.execute(
+                    """
+                    SELECT
+                        qq.id,
+                        qq.question,
+                        qq.options,
+                        qq.difficulty
+                    FROM quiz_questions qq
+
+                    JOIN document_chunks dc
+                        ON qq.chunk_id = dc.id
+
+                    WHERE dc.document_id = ANY(%s)
+                      AND qq.difficulty = %s
+                      AND NOT (qq.id = ANY(%s))
+
+                    ORDER BY RANDOM()
+
+                    LIMIT %s
+                    """,
+                    (
+                        document_ids,
+                        difficulty,
+                        list(seen_question_ids),
+                        question_count
+                    )
+                )
+
+            else:
+
+                cursor.execute(
+                    """
+                    SELECT
+                        qq.id,
+                        qq.question,
+                        qq.options,
+                        qq.difficulty
+                    FROM quiz_questions qq
+
+                    JOIN document_chunks dc
+                        ON qq.chunk_id = dc.id
+
+                    WHERE dc.document_id = ANY(%s)
+                      AND qq.difficulty = %s
+
+                    ORDER BY RANDOM()
+
+                    LIMIT %s
+                    """,
+                    (
+                        document_ids,
+                        difficulty,
+                        question_count
+                    )
+                )
+
+            rows = cursor.fetchall()
+
+    questions = []
+
+    for row in rows:
+
+        options = row[2]
+
+        if isinstance(
+            options,
+            str
+        ):
+
+            options = json.loads(
+                options
+            )
+
+        questions.append(
+            {
+                "id": row[0],
+                "question": row[1],
+                "options": options,
+                "difficulty": row[3]
+            }
+        )
+
+    return questions
+
+
+def check_quiz_answer(
+    question_id: int,
+    answer: int
+):
+    if answer not in {
+        0,
+        1,
+        2,
+        3
+    }:
+
+        raise ValueError(
+            "La réponse doit être un entier compris entre 0 et 3."
+        )
+
+    with get_connection() as conn:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT
+                    correct_answer,
+                    explanation
+                FROM quiz_questions
+                WHERE id = %s
+                """,
+                (question_id,)
+            )
+
+            result = cursor.fetchone()
+
+    if result is None:
+
+        raise ValueError(
+            "Question introuvable."
+        )
+
+    correct_answer = int(
+        result[0]
+    )
+
+    explanation = result[1]
+
+    return {
+        "is_correct": (
+            answer == correct_answer
+        ),
+        "correct_answer": correct_answer,
+        "explanation": explanation
+    }
+
+
+def generate_quiz(
+    document: str,
+    question_count: int,
+    difficulty: str,
+    user_id: int
+):
+    if question_count not in {
+        5,
+        10,
+        15,
+        20
+    }:
+
+        raise ValueError(
+            "Le nombre de questions doit être 5, 10, 15 ou 20."
+        )
+
+    if difficulty not in {
+        "easy",
+        "medium",
+        "hard"
+    }:
+
+        raise ValueError(
+            "La difficulté doit être easy, medium ou hard."
+        )
+
+    max_capacity = get_max_capacity(
+        document
+    )
+
+    if max_capacity == 0:
+
+        raise ValueError(
+            "Aucun chunk disponible pour ce document."
+        )
+
+    current_count = count_questions(
+        document,
+        difficulty
+    )
+
+    target_bank_size = min(
+        TARGET_QUESTION_COUNT,
+        max_capacity
+    )
+
+    if current_count < target_bank_size:
+
+        print(
+            f"Banque {difficulty} : "
+            f"{current_count}/{target_bank_size} questions."
+        )
+
+        generate_questions_for_bank(
+            document=document,
+            difficulty=difficulty,
+            target_count=target_bank_size
+        )
+
+    questions = get_random_questions(
+        document=document,
+        difficulty=difficulty,
+        question_count=question_count,
+        user_id=user_id
+    )
+
+    if len(questions) < question_count:
+
+        raise ValueError(
+            "Pas assez de questions non vues disponibles "
+            "pour cet utilisateur."
+        )
+
+    return {
+        "questions": questions
+    }
+
+class QuestionBankManager:
+    """Compatibility manager used by FastAPI startup/shutdown.
+
+    The question-bank generation is performed on demand by the
+    generate_quiz() function above. This object keeps the existing
+    FastAPI lifespan API compatible without launching background work.
+    """
+
+    def start(self):
+        print("[WebIA] QuestionBankManager prêt.")
+
+    def stop(self):
+        print("[WebIA] QuestionBankManager arrêté.")
 
 
 question_bank_manager = QuestionBankManager()
