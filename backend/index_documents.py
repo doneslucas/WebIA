@@ -32,9 +32,14 @@ def main():
         try:
             result = index_pdf(file_path)
 
+            chunk_count = result.get(
+                "chunk_count",
+                result.get("chunks", 0)
+            )
+
             print(
                 f"✓ {result['file']} "
-                f"({result['chunks']} chunks)\n"
+                f"({chunk_count} chunks)\n"
             )
 
         except Exception as error:
