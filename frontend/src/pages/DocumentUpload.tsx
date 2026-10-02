@@ -19,19 +19,29 @@ import {
 import "./DocumentUpload.css";
 
 
-type DocumentItem = {
-  id: number;
-  file: string;
-  chunks: number;
-  created_at: string | null;
-};
-
-
 type DifficultyProgress = {
   status: string;
   current: number;
   target: number;
   progress: number;
+};
+
+
+type DocumentItem = {
+  id: number;
+  file: string;
+  chunks: number;
+  created_at: string | null;
+
+  processing_status?: string;
+
+  global_progress?: number;
+
+  indexing_progress?: number;
+
+  easy?: DifficultyProgress;
+  medium?: DifficultyProgress;
+  hard?: DifficultyProgress;
 };
 
 
@@ -56,6 +66,14 @@ type GenerationProgress = {
   medium: DifficultyProgress;
   hard: DifficultyProgress;
 };
+
+
+const ACTIVE_DOCUMENT_KEY =
+  "webia_active_document";
+
+
+const ACTIVE_PROGRESS_KEY =
+  "webia_active_document_progress";
 
 
 function DocumentUpload() {
@@ -88,6 +106,9 @@ function DocumentUpload() {
   const pollingRef =
     useRef<number | null>(null);
 
+  const pollingRequestInProgressRef =
+    useRef(false);
+
 
   function stopProgressPolling() {
 
@@ -101,12 +122,110 @@ function DocumentUpload() {
 
       pollingRef.current = null;
     }
+
+    pollingRequestInProgressRef.current =
+      false;
+  }
+
+
+  function saveActiveDocument(
+    filename: string
+  ) {
+
+    localStorage.setItem(
+      ACTIVE_DOCUMENT_KEY,
+      filename
+    );
+  }
+
+
+  function removeActiveDocument() {
+
+    localStorage.removeItem(
+      ACTIVE_DOCUMENT_KEY
+    );
+
+    localStorage.removeItem(
+      ACTIVE_PROGRESS_KEY
+    );
+  }
+
+
+  function saveProgress(
+    progress: GenerationProgress
+  ) {
+
+    try {
+
+      localStorage.setItem(
+        ACTIVE_PROGRESS_KEY,
+        JSON.stringify(progress)
+      );
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de sauvegarder la progression :",
+        error
+      );
+    }
+  }
+
+
+  function loadSavedProgress(): GenerationProgress | null {
+
+    try {
+
+      const savedProgress =
+        localStorage.getItem(
+          ACTIVE_PROGRESS_KEY
+        );
+
+      if (!savedProgress) {
+        return null;
+      }
+
+      return JSON.parse(
+        savedProgress
+      ) as GenerationProgress;
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de récupérer la progression sauvegardée :",
+        error
+      );
+
+      return null;
+    }
   }
 
 
   useEffect(() => {
 
     loadDocuments();
+
+    const activeDocument =
+      localStorage.getItem(
+        ACTIVE_DOCUMENT_KEY
+      );
+
+    const savedProgress =
+      loadSavedProgress();
+
+    if (savedProgress) {
+
+      setGenerationProgress(
+        savedProgress
+      );
+    }
+
+    if (activeDocument) {
+
+      startProgressPolling(
+        activeDocument
+      );
+    }
 
     return () => {
 
@@ -171,6 +290,57 @@ function DocumentUpload() {
   }
 
 
+  function updateDocumentProgress(
+    progress: GenerationProgress
+  ) {
+
+    setDocuments(
+      (currentDocuments) => {
+
+        return currentDocuments.map(
+          (document) => {
+
+            if (
+              document.file !==
+              progress.document
+            ) {
+
+              return document;
+            }
+
+            const progressValue =
+              progress.status === "indexing"
+                ? progress.indexing_progress
+                : progress.global_progress;
+
+            return {
+              ...document,
+
+              processing_status:
+                progress.status,
+
+              indexing_progress:
+                progress.indexing_progress,
+
+              global_progress:
+                progressValue,
+
+              easy:
+                progress.easy,
+
+              medium:
+                progress.medium,
+
+              hard:
+                progress.hard,
+            };
+          }
+        );
+      }
+    );
+  }
+
+
   function openFilePicker() {
 
     if (loading) {
@@ -232,6 +402,9 @@ function DocumentUpload() {
       case "chunks":
         return "Découpage en chunks";
 
+      case "categories":
+        return "Classification des catégories";
+
       case "embeddings":
         return "Génération des embeddings";
 
@@ -253,9 +426,112 @@ function DocumentUpload() {
   }
 
 
+  function getDocumentStatusLabel(
+    status: string | undefined
+  ) {
+
+    switch (status) {
+
+      case "pending":
+        return "En attente";
+
+      case "indexing":
+        return "Indexation en cours";
+
+      case "generating":
+        return "Génération des questions";
+
+      case "completed":
+        return "Disponible";
+
+      case "error":
+        return "Erreur de traitement";
+
+      case "not_started":
+      case undefined:
+        return "Disponible";
+
+      default:
+        return status;
+    }
+  }
+
+
+  function getDocumentStatusDescription(
+    document: DocumentItem
+  ) {
+
+    switch (document.processing_status) {
+
+      case "pending":
+        return "Le traitement va commencer.";
+
+      case "indexing":
+        return "Le document est en cours d'indexation.";
+
+      case "generating":
+        return "Les questions sont en cours de génération.";
+
+      case "completed":
+        return "Document prêt à être utilisé.";
+
+      case "error":
+        return "Une erreur est survenue pendant le traitement.";
+
+      case "not_started":
+      case undefined:
+        return "Document prêt à être utilisé.";
+
+      default:
+        return "Traitement du document en cours.";
+    }
+  }
+
+
+  function getDocumentStatusClass(
+    status: string | undefined
+  ) {
+
+    switch (status) {
+
+      case "pending":
+        return "generation-status-pending";
+
+      case "indexing":
+        return "generation-status-indexing";
+
+      case "generating":
+        return "generation-status-generating";
+
+      case "completed":
+        return "generation-status-completed";
+
+      case "error":
+        return "generation-status-error";
+
+      default:
+        return "generation-status-completed";
+    }
+  }
+
+
   async function checkGenerationProgress(
     filename: string
   ) {
+
+    /*
+     * Empêche plusieurs requêtes de progression
+     * de s'exécuter en même temps.
+     */
+    if (
+      pollingRequestInProgressRef.current
+    ) {
+
+      return;
+    }
+
+    pollingRequestInProgressRef.current =
+      true;
 
     try {
 
@@ -280,16 +556,42 @@ function DocumentUpload() {
         data
       );
 
+      saveProgress(
+        data
+      );
+
+      /*
+       * IMPORTANT :
+       *
+       * On ne recharge PLUS toute la liste des documents
+       * à chaque seconde.
+       *
+       * On met uniquement à jour le document actuellement
+       * suivi.
+       */
+      updateDocumentProgress(
+        data
+      );
+
       if (
         data.status === "completed"
       ) {
 
         setMessage(
-          `${filename} : génération des questions terminée.`
+          `${filename} : traitement terminé.`
         );
 
         stopProgressPolling();
 
+        removeActiveDocument();
+
+        setGenerationProgress(
+          data
+        );
+
+        /*
+         * Une seule actualisation finale de la liste.
+         */
         await loadDocuments();
 
         return;
@@ -304,6 +606,15 @@ function DocumentUpload() {
         );
 
         stopProgressPolling();
+
+        removeActiveDocument();
+
+        /*
+         * Une seule actualisation finale de la liste.
+         */
+        await loadDocuments();
+
+        return;
       }
 
     } catch (error) {
@@ -312,6 +623,11 @@ function DocumentUpload() {
         "Erreur lors de la récupération de la progression :",
         error
       );
+
+    } finally {
+
+      pollingRequestInProgressRef.current =
+        false;
     }
   }
 
@@ -321,6 +637,10 @@ function DocumentUpload() {
   ) {
 
     stopProgressPolling();
+
+    saveActiveDocument(
+      filename
+    );
 
     checkGenerationProgress(
       filename
@@ -377,16 +697,15 @@ function DocumentUpload() {
 
     stopProgressPolling();
 
+    saveActiveDocument(
+      filename
+    );
+
     try {
 
       /*
-       * On démarre le polling AVANT l'upload.
-       *
-       * Le backend traite index_pdf() dans un thread séparé.
-       * Le endpoint /progress peut donc être interrogé
-       * pendant que l'indexation est encore en cours.
+       * Le suivi démarre avant l'upload.
        */
-
       startProgressPolling(
         filename
       );
@@ -406,6 +725,10 @@ function DocumentUpload() {
         if (
           returnedFilename !== filename
         ) {
+
+          saveActiveDocument(
+            returnedFilename
+          );
 
           stopProgressPolling();
 
@@ -429,11 +752,16 @@ function DocumentUpload() {
           );
         }
 
+        /*
+         * Un seul rechargement après l'upload.
+         */
         await loadDocuments();
 
       } else {
 
         stopProgressPolling();
+
+        removeActiveDocument();
 
         setGenerationProgress(
           null
@@ -453,6 +781,8 @@ function DocumentUpload() {
       );
 
       stopProgressPolling();
+
+      removeActiveDocument();
 
       setMessage(
         "Impossible de communiquer avec le serveur."
@@ -574,6 +904,8 @@ function DocumentUpload() {
       ) {
 
         stopProgressPolling();
+
+        removeActiveDocument();
 
         setGenerationProgress(
           null
@@ -834,7 +1166,8 @@ function DocumentUpload() {
 
                 <span>
                   {" "}
-                  —{" "}
+                  —
+                  {" "}
                   {generationProgress.indexing.details}
                 </span>
 
@@ -979,49 +1312,128 @@ function DocumentUpload() {
           <div className="document-items">
 
             {documents.map(
-              (document) => (
+              (document) => {
 
-                <div
-                  className="document-item"
-                  key={document.id}
-                >
+                const status =
+                  document.processing_status;
 
-                  <div className="document-item-icon">
-                    📄
-                  </div>
+                const statusLabel =
+                  getDocumentStatusLabel(
+                    status
+                  );
 
+                const statusDescription =
+                  getDocumentStatusDescription(
+                    document
+                  );
 
-                  <div className="document-item-info">
+                const statusClass =
+                  getDocumentStatusClass(
+                    status
+                  );
 
-                    <h3>
-                      {document.file}
-                    </h3>
+                /*
+                 * La barre n'est affichée que pour
+                 * un document réellement en traitement.
+                 */
+                const isProcessing =
+                  status === "pending" ||
+                  status === "indexing" ||
+                  status === "generating";
 
-                    <p>
-                      Document disponible
-                    </p>
-
-                  </div>
-
-
-                  <button
-                    type="button"
-                    className="document-delete-button"
-                    onClick={() =>
-                      handleDelete(
-                        document.file
+                const documentProgress =
+                  isProcessing
+                    ? (
+                        status === "indexing"
+                          ? document.indexing_progress
+                          : document.global_progress
                       )
-                    }
-                    disabled={loading}
-                    title={
-                      `Supprimer ${document.file}`
-                    }
-                  >
-                    🗑️
-                  </button>
+                    : null;
 
-                </div>
-              )
+                return (
+
+                  <div
+                    className="document-item"
+                    key={document.id}
+                  >
+
+                    <div className="document-item-icon">
+                      📄
+                    </div>
+
+
+                    <div className="document-item-info">
+
+                      <h3>
+                        {document.file}
+                      </h3>
+
+
+                      <p>
+                        {statusDescription}
+                      </p>
+
+
+                      <div className="document-item-status">
+
+                        <span
+                          className={
+                            `generation-status ${statusClass}`
+                          }
+                        >
+                          {statusLabel}
+                        </span>
+
+                        {documentProgress !== null && (
+
+                          <span>
+                            {documentProgress}%
+                          </span>
+
+                        )}
+
+                      </div>
+
+
+                      {documentProgress !== null && (
+
+                        <div className="generation-progress-bar">
+
+                          <div
+                            className="generation-progress-bar-fill"
+                            style={{
+                              width:
+                                `${documentProgress}%`,
+                            }}
+                          />
+
+                        </div>
+
+                      )}
+
+                    </div>
+
+
+                    <button
+                      type="button"
+                      className="document-delete-button"
+                      onClick={() =>
+                        handleDelete(
+                          document.file
+                        )
+                      }
+                      disabled={loading}
+                      title={
+                        `Supprimer ${document.file}`
+                      }
+                    >
+                      🗑️
+                    </button>
+
+                  </div>
+
+                );
+              }
             )}
 
           </div>

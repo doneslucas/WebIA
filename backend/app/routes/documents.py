@@ -133,13 +133,83 @@ def list_documents(
 
     Cette route ne permet aucune modification
     des documents.
+
+    En plus des informations générales du document,
+    la route retourne maintenant son état réel de
+    traitement afin que le frontend puisse distinguer
+    un document terminé d'un document encore en cours
+    d'indexation ou de génération.
     """
 
     try:
 
+        documents = get_all_documents()
+
+        enriched_documents = []
+
+        for document in documents:
+
+            filename = document.get(
+                "file"
+            )
+
+            if not filename:
+
+                enriched_documents.append(
+                    document
+                )
+
+                continue
+
+            try:
+
+                progress = get_generation_progress(
+                    filename
+                )
+
+                if isinstance(
+                    progress,
+                    dict
+                ):
+
+                    document = {
+                        **document,
+                        "processing_status":
+                            progress.get(
+                                "status",
+                                "not_started"
+                            ),
+                        "global_progress":
+                            progress.get(
+                                "global_progress",
+                                0
+                            )
+                    }
+
+            except Exception as progress_error:
+
+                print(
+                    "[Documents] "
+                    f"Impossible de récupérer "
+                    f"la progression de {filename} : "
+                    f"{progress_error}"
+                )
+
+                document = {
+                    **document,
+                    "processing_status":
+                        "not_started",
+                    "global_progress":
+                        0
+                }
+
+            enriched_documents.append(
+                document
+            )
+
         return {
             "documents":
-                get_all_documents()
+                enriched_documents
         }
 
     except Exception as error:
