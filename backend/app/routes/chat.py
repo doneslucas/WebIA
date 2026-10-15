@@ -6,7 +6,6 @@ from app.services.rag import ask_rag
 
 from app.services.auth import verify_token
 
-from app.services.task_manager import task_manager
 
 
 router = APIRouter(
@@ -25,9 +24,6 @@ def chat(
     request: ChatRequest,
     payload: dict = Depends(verify_token)
 ):
-    task_manager.start_user_request()
-
-    try:
-        return ask_rag(request.question)
-    finally:
-        task_manager.end_user_request()
+    # La priorité est gérée de façon centralisée par le middleware HTTP
+    # pour le chatbot et le quiz. Ne pas incrémenter ici une seconde fois.
+    return ask_rag(request.question)

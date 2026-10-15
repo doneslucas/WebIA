@@ -1,90 +1,77 @@
 import json
-import os
 import re
+from typing import Optional
 
-from typing import Callable
-from threading import Lock
+from langchain_ollama import OllamaLLM
 
-from dotenv import load_dotenv
-from langchain_ollama import OllamaEmbeddings, OllamaLLM
-
-from app.services.task_manager import task_manager
 from app.database.connection import get_connection
 from app.services.chroma import collection
+from app.services.categories import get_category_by_id
+from app.services.task_manager import task_manager
 
 
-load_dotenv()
-
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 CRITICAL_THRESHOLD = 20
 GENERATION_THRESHOLD = 35
+
 TARGET_QUESTION_COUNT = 50
+
+# Maximum par difficulté et par chunk.
 QUESTION_LIMIT_PER_CHUNK = 5
 
-BATCH_SIZE = 2
-MAX_ATTEMPTS = 10
-MAX_EMPTY_PASSES = 3
+# Maximum toutes difficultés confondues et par chunk.
+TOTAL_QUESTION_LIMIT_PER_CHUNK = 15
 
+BATCH_SIZE = 2
+MAX_ATTEMPTS = 3
+MAX_EMPTY_PASSES = 3
 QUIZ_NUM_PREDICT = 1000
 
+VALID_DIFFICULTIES = {
+    "easy",
+    "medium",
+    "hard",
+}
 
-generation_lock = Lock()
-
-active_generations = set()
-
-
-# -------------------------------------------------
-# Configuration Ollama
-# -------------------------------------------------
-
-OLLAMA_HOST = os.getenv(
-    "OLLAMA_HOST",
-    "localhost"
-)
-
-OLLAMA_PORT = os.getenv(
-    "OLLAMA_PORT",
-    "11434"
-)
-
-OLLAMA_BASE_URL = (
-    f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
-)
+VALID_QUESTION_COUNTS = {
+    5,
+    10,
+    15,
+    20,
+}
 
 
-# -------------------------------------------------
-# Modèle utilisé pour transformer les chunks/questions
-# en vecteurs
-# -------------------------------------------------
-
-embeddings = OllamaEmbeddings(
-    model="nomic-embed-text",
-    base_url=OLLAMA_BASE_URL
-)
-
-
-# -------------------------------------------------
-# Modèle utilisé pour générer les questions
-# -------------------------------------------------
+# ============================================================
+# LLM
+# ============================================================
 
 llm = OllamaLLM(
     model="llama3.2:latest",
-    base_url=OLLAMA_BASE_URL,
     num_predict=QUIZ_NUM_PREDICT,
     format="json",
-    temperature=0.5
+    temperature=0.2,
 )
 
+
+# ============================================================
+# OUTILS
+# ============================================================
 
 def normalize_question(question: str) -> str:
     return re.sub(
         r"\s+",
         " ",
-        question.strip().lower()
+        question.strip().lower(),
     )
 
 
 def clean_json_response(response: str) -> str:
+    if not isinstance(response, str):
+        raise ValueError("La réponse du LLM n'est pas du texte.")
+
     response = response.strip()
 
     if response.startswith("```"):
@@ -92,153 +79,145 @@ def clean_json_response(response: str) -> str:
             r"^```(?:json)?\s*",
             "",
             response,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
-
-        response = re.sub(
-            r"\s*```$",
-            "",
-            response
-        )
+        response = re.sub(r"\s*```$", "", response)
 
     start = response.find("{")
     end = response.rfind("}")
 
-    if start == -1 or end == -1:
+    if start == -1 or end == -1 or end < start:
         raise ValueError(
-            "La réponse du LLM ne contient pas de JSON valide."
+            "La réponse du LLM ne contient pas d'objet JSON exploitable."
         )
 
     return response[start:end + 1]
 
 
+def validate_difficulty(difficulty: str):
+    if difficulty not in VALID_DIFFICULTIES:
+        raise ValueError(
+            "La difficulté doit être easy, medium ou hard."
+        )
+
+
+def validate_question_count(question_count: int):
+    if question_count not in VALID_QUESTION_COUNTS:
+        raise ValueError(
+            "Le nombre de questions doit être 5, 10, 15 ou 20."
+        )
+
+
+# ============================================================
+# VALIDATION DES QUESTIONS
+# ============================================================
+
+def get_question_validation_error(question) -> Optional[str]:
+    """Retourne la raison du rejet, ou None si la question est valide."""
+    if not isinstance(question, dict):
+        return "La question n'est pas un objet JSON."
+
+    question_text = question.get("question")
+
+    if not isinstance(question_text, str):
+        return "Le champ 'question' est absent ou invalide."
+
+    if not question_text.strip():
+        return "Le texte de la question est vide."
+
+    options = question.get("options")
+
+    if not isinstance(options, list):
+        return "Le champ 'options' n'est pas une liste."
+
+    if len(options) != 4:
+        return (
+            f"La question contient {len(options)} options "
+            "au lieu de 4."
+        )
+
+    if not all(
+        isinstance(option, str) and option.strip()
+        for option in options
+    ):
+        return "Au moins une option est vide ou invalide."
+
+    normalized_options = [
+        normalize_question(option)
+        for option in options
+    ]
+
+    if len(set(normalized_options)) != 4:
+        return "Les quatre options ne sont pas différentes."
+
+    correct_answer = question.get("correct_answer")
+
+    if (
+        isinstance(correct_answer, str)
+        and correct_answer.strip() in {"0", "1", "2", "3"}
+    ):
+        question["correct_answer"] = int(correct_answer.strip())
+        correct_answer = question["correct_answer"]
+
+    if (
+        not isinstance(correct_answer, int)
+        or isinstance(correct_answer, bool)
+    ):
+        return (
+            "Le champ 'correct_answer' doit être "
+            "un entier compris entre 0 et 3."
+        )
+
+    if correct_answer not in {0, 1, 2, 3}:
+        return "Le champ 'correct_answer' est en dehors de l'intervalle autorisé."
+
+    explanation = question.get("explanation")
+
+    if not isinstance(explanation, str) or not explanation.strip():
+        return "L'explication est absente, invalide ou vide."
+
+    return None
+
+
+def is_valid_generated_question(question) -> bool:
+    return get_question_validation_error(question) is None
+
+
 def validate_quiz(data):
-    if not isinstance(data, dict):
-        return False
-
-    questions = data.get("questions")
-
-    if not isinstance(questions, list):
-        return False
-
-    if not questions:
-        return False
-
-    for question in questions:
-
-        if not isinstance(question, dict):
-            return False
-
-        question_text = question.get("question")
-
-        if not isinstance(
-            question_text,
-            str
-        ):
-            return False
-
-        if not question_text.strip():
-            return False
-
-        options = question.get("options")
-
-        if not isinstance(
-            options,
-            list
-        ):
-            return False
-
-        if len(options) != 4:
-            return False
-
-        if not all(
-            isinstance(option, str)
-            and option.strip()
-            for option in options
-        ):
-            return False
-
-        normalized_options = [
-            normalize_question(option)
-            for option in options
-        ]
-
-        if len(
-            set(normalized_options)
-        ) != 4:
-            return False
-
-        correct_answer = question.get(
-            "correct_answer"
-        )
-
-        if not isinstance(
-            correct_answer,
-            int
-        ):
-            return False
-
-        if correct_answer not in {
-            0,
-            1,
-            2,
-            3
-        }:
-            return False
-
-        explanation = question.get(
-            "explanation"
-        )
-
-        if not isinstance(
-            explanation,
-            str
-        ):
-            return False
-
-        if not explanation.strip():
-            return False
-
-    return True
+    """Vérifie la structure générale d'une réponse du modèle."""
+    return (
+        isinstance(data, dict)
+        and isinstance(data.get("questions"), list)
+        and bool(data["questions"])
+    )
 
 
 def parse_quiz_response(response: str):
-    cleaned_response = clean_json_response(
-        response
-    )
+    cleaned_response = clean_json_response(response)
 
     try:
-
-        data = json.loads(
-            cleaned_response
-        )
-
+        data = json.loads(cleaned_response)
     except json.JSONDecodeError as error:
-
         raise ValueError(
             f"JSON invalide retourné par le LLM : {error}"
-        )
+        ) from error
 
     if not validate_quiz(data):
-
         raise ValueError(
-            "Le format du quiz généré est invalide."
+            "Le JSON ne contient pas de liste 'questions' exploitable."
         )
 
     return data["questions"]
 
 
-def get_documents_scope(
-    document: str
-):
-    document_ids = None
+# ============================================================
+# DOCUMENTS
+# ============================================================
 
+def get_documents_scope(document: str):
     if document == "all":
-
         with get_connection() as conn:
-
             with conn.cursor() as cursor:
-
                 cursor.execute(
                     """
                     SELECT id
@@ -246,553 +225,444 @@ def get_documents_scope(
                     ORDER BY id
                     """
                 )
-
                 rows = cursor.fetchall()
 
-        document_ids = [
-            row[0]
-            for row in rows
-        ]
+        return [row[0] for row in rows]
 
-    else:
-
-        with get_connection() as conn:
-
-            with conn.cursor() as cursor:
-
-                cursor.execute(
-                    """
-                    SELECT id
-                    FROM documents
-                    WHERE file_name = %s
-                    """,
-                    (document,)
-                )
-
-                result = cursor.fetchone()
-
-        if result is None:
-
-            raise ValueError(
-                f"Document introuvable : {document}"
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id
+                FROM documents
+                WHERE file_name = %s
+                """,
+                (document,),
             )
+            result = cursor.fetchone()
 
-        document_ids = [
-            result[0]
-        ]
+    if result is None:
+        raise ValueError(f"Document introuvable : {document}")
 
-    return document_ids
+    return [result[0]]
 
+
+# ============================================================
+# CATÉGORIES
+# ============================================================
+
+def validate_category_ids(
+    category_ids: Optional[list[int]],
+):
+    if category_ids is None:
+        return []
+
+    if not isinstance(category_ids, list):
+        raise ValueError("category_ids doit être une liste.")
+
+    if not category_ids:
+        return []
+
+    normalized_ids = []
+
+    for category_id in category_ids:
+        if (
+            not isinstance(category_id, int)
+            or isinstance(category_id, bool)
+        ):
+            raise ValueError("Chaque category_id doit être un entier.")
+
+        category = get_category_by_id(category_id)
+
+        if category is None:
+            raise ValueError(f"Catégorie introuvable : {category_id}")
+
+        normalized_ids.append(category_id)
+
+    return list(dict.fromkeys(normalized_ids))
+
+
+def get_category_filter_sql(
+    category_ids: Optional[list[int]],
+):
+    if not category_ids:
+        return "", []
+
+    return (
+        """
+        AND dc.category_id = ANY(%s)
+        """,
+        [category_ids],
+    )
+
+
+# ============================================================
+# CHUNKS DISPONIBLES POUR LA GÉNÉRATION
+# ============================================================
 
 def get_available_chunks(
     document: str,
-    difficulty: str
+    difficulty: str,
+    category_ids: Optional[list[int]] = None,
 ):
-    """
-    Retourne les chunks qui peuvent encore recevoir
-    des questions pour la difficulté demandée.
+    """Retourne les chunks classés qui ont encore une capacité disponible."""
+    validate_difficulty(difficulty)
+    category_ids = validate_category_ids(category_ids)
+    document_ids = get_documents_scope(document)
+    category_sql, category_params = get_category_filter_sql(category_ids)
 
-    La limite de 5 questions est indépendante
-    pour chaque difficulté.
+    query = f"""
+        SELECT
+            dc.id,
+            dc.chroma_id,
+            dc.category_id,
+            COUNT(qq.id) AS difficulty_count
+        FROM document_chunks dc
+        LEFT JOIN quiz_questions qq
+            ON qq.chunk_id = dc.id
+           AND qq.difficulty = %s
+        WHERE dc.document_id = ANY(%s)
+          AND dc.category_id IS NOT NULL
+          {category_sql}
+        GROUP BY dc.id, dc.chroma_id, dc.category_id, dc.question_limit
+        HAVING COUNT(qq.id) < LEAST(
+                   COALESCE(NULLIF(dc.question_limit, 0), %s),
+                   %s
+               )
+           AND (
+               SELECT COUNT(*)
+               FROM quiz_questions qq_total
+               WHERE qq_total.chunk_id = dc.id
+           ) < LEAST(
+                   COALESCE(NULLIF(dc.question_limit, 0), %s),
+                   %s
+               )
+        ORDER BY dc.id
     """
 
-    document_ids = get_documents_scope(
-        document
-    )
+    params = [
+        difficulty,
+        document_ids,
+        *category_params,
+        TOTAL_QUESTION_LIMIT_PER_CHUNK,
+        QUESTION_LIMIT_PER_CHUNK,
+        TOTAL_QUESTION_LIMIT_PER_CHUNK,
+        TOTAL_QUESTION_LIMIT_PER_CHUNK,
+    ]
 
     with get_connection() as conn:
-
         with conn.cursor() as cursor:
-
-            cursor.execute(
-                """
-                SELECT
-                    dc.id,
-                    dc.chroma_id,
-                    COUNT(qq.id) AS difficulty_count
-                FROM document_chunks dc
-
-                LEFT JOIN quiz_questions qq
-                    ON qq.chunk_id = dc.id
-                    AND qq.difficulty = %s
-
-                WHERE dc.document_id = ANY(%s)
-
-                GROUP BY
-                    dc.id,
-                    dc.chroma_id
-
-                HAVING COUNT(qq.id) < %s
-
-                ORDER BY dc.id
-                """,
-                (
-                    difficulty,
-                    document_ids,
-                    QUESTION_LIMIT_PER_CHUNK
-                )
-            )
-
+            cursor.execute(query, params)
             return cursor.fetchall()
 
 
+# ============================================================
+# COMPTAGE DE LA BANQUE
+# ============================================================
+
 def count_questions(
-    document: str,
-    difficulty: str
+    difficulty: str,
+    category_ids: Optional[list[int]] = None,
+    document: Optional[str] = None,
 ):
-    document_ids = get_documents_scope(
-        document
-    )
+    validate_difficulty(difficulty)
+    category_ids = validate_category_ids(category_ids)
+
+    category_sql, category_params = get_category_filter_sql(category_ids)
+    document_sql = ""
+    document_params = []
+
+    if document is not None:
+        document_ids = get_documents_scope(document)
+        document_sql = "AND dc.document_id = ANY(%s)"
+        document_params = [document_ids]
+
+    query = f"""
+        SELECT COUNT(*)
+        FROM quiz_questions qq
+        JOIN document_chunks dc ON qq.chunk_id = dc.id
+        WHERE qq.difficulty = %s
+          AND dc.category_id IS NOT NULL
+          {document_sql}
+          {category_sql}
+    """
+
+    params = [
+        difficulty,
+        *document_params,
+        *category_params,
+    ]
 
     with get_connection() as conn:
-
         with conn.cursor() as cursor:
-
-            cursor.execute(
-                """
-                SELECT COUNT(*)
-                FROM quiz_questions qq
-
-                JOIN document_chunks dc
-                    ON qq.chunk_id = dc.id
-
-                WHERE dc.document_id = ANY(%s)
-                  AND qq.difficulty = %s
-                """,
-                (
-                    document_ids,
-                    difficulty
-                )
-            )
-
+            cursor.execute(query, params)
             return cursor.fetchone()[0]
 
 
 def get_max_capacity(
-    document: str
+    difficulty: Optional[str] = None,
+    category_ids: Optional[list[int]] = None,
+    document: Optional[str] = None,
 ):
-    """
-    Capacité maximale pour une difficulté.
+    """Calcule la capacité théorique des chunks classifiés."""
+    if difficulty is not None:
+        validate_difficulty(difficulty)
 
-    Chaque difficulté possède sa propre capacité :
+    category_ids = validate_category_ids(category_ids)
+    category_sql, category_params = get_category_filter_sql(category_ids)
 
-    nombre de chunks × 5 questions.
-    """
+    document_sql = ""
+    document_params = []
 
-    document_ids = get_documents_scope(
-        document
+    if document is not None:
+        document_ids = get_documents_scope(document)
+        document_sql = "AND dc.document_id = ANY(%s)"
+        document_params = [document_ids]
+
+    per_chunk_cap = (
+        QUESTION_LIMIT_PER_CHUNK
+        if difficulty is not None
+        else TOTAL_QUESTION_LIMIT_PER_CHUNK
     )
 
-    with get_connection() as conn:
-
-        with conn.cursor() as cursor:
-
-            cursor.execute(
-                """
-                SELECT COALESCE(
-                    SUM(question_limit),
-                    0
+    query = f"""
+        SELECT COALESCE(
+            SUM(
+                LEAST(
+                    COALESCE(NULLIF(dc.question_limit, 0), %s),
+                    %s
                 )
-                FROM document_chunks
-                WHERE document_id = ANY(%s)
-                """,
-                (document_ids,)
-            )
+            ),
+            0
+        )
+        FROM document_chunks dc
+        WHERE dc.category_id IS NOT NULL
+          {document_sql}
+          {category_sql}
+    """
 
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                query,
+                [
+                    TOTAL_QUESTION_LIMIT_PER_CHUNK,
+                    per_chunk_cap,
+                    *document_params,
+                    *category_params,
+                ],
+            )
             return cursor.fetchone()[0]
 
 
-def get_existing_questions(
-    document: str,
-    difficulty: str
+# ============================================================
+# STATUT DE LA BANQUE
+# ============================================================
+
+def get_bank_status(
+    category_ids: Optional[list[int]] = None,
 ):
-    document_ids = get_documents_scope(
-        document
-    )
+    category_ids = validate_category_ids(category_ids)
+    status = {}
 
-    with get_connection() as conn:
+    for difficulty in VALID_DIFFICULTIES:
+        count = count_questions(
+            difficulty=difficulty,
+            category_ids=category_ids,
+        )
 
-        with conn.cursor() as cursor:
+        capacity = get_max_capacity(
+            difficulty=difficulty,
+            category_ids=category_ids,
+        )
 
-            cursor.execute(
-                """
-                SELECT
-                    qq.id,
-                    qq.question
-                FROM quiz_questions qq
+        target = min(TARGET_QUESTION_COUNT, capacity)
 
-                JOIN document_chunks dc
-                    ON qq.chunk_id = dc.id
+        status[difficulty] = {
+            "current": count,
+            "target": target,
+            "capacity": capacity,
+            "complete": count >= target,
+            "critical": count < CRITICAL_THRESHOLD,
+            "needs_generation": count < GENERATION_THRESHOLD,
+            "remaining": max(0, target - count),
+        }
 
-                WHERE dc.document_id = ANY(%s)
-                  AND qq.difficulty = %s
-                """,
-                (
-                    document_ids,
-                    difficulty
-                )
+    return status
+
+
+def get_category_bank_status(
+    category_ids: list[int],
+):
+    category_ids = validate_category_ids(category_ids)
+    result = {}
+
+    for category_id in category_ids:
+        result[category_id] = {}
+
+        for difficulty in VALID_DIFFICULTIES:
+            count = count_questions(
+                difficulty=difficulty,
+                category_ids=[category_id],
             )
 
+            capacity = get_max_capacity(
+                difficulty=difficulty,
+                category_ids=[category_id],
+            )
+
+            target = min(TARGET_QUESTION_COUNT, capacity)
+
+            result[category_id][difficulty] = {
+                "current": count,
+                "target": target,
+                "capacity": capacity,
+                "complete": count >= target,
+                "critical": count < CRITICAL_THRESHOLD,
+                "needs_generation": count < GENERATION_THRESHOLD,
+                "remaining": max(0, target - count),
+            }
+
+    return result
+
+
+# ============================================================
+# QUESTIONS EXISTANTES ET DOUBLONS
+# ============================================================
+
+def get_existing_questions(
+    category_ids: Optional[list[int]] = None,
+    document: Optional[str] = None,
+):
+    """Récupère les questions présentes, éventuellement par document/catégorie."""
+    category_ids = validate_category_ids(category_ids)
+    category_sql, category_params = get_category_filter_sql(category_ids)
+
+    document_sql = ""
+    document_params = []
+
+    if document is not None:
+        document_ids = get_documents_scope(document)
+        document_sql = "AND dc.document_id = ANY(%s)"
+        document_params = [document_ids]
+
+    query = f"""
+        SELECT qq.id, qq.question, qq.difficulty
+        FROM quiz_questions qq
+        JOIN document_chunks dc ON qq.chunk_id = dc.id
+        WHERE 1 = 1
+          {document_sql}
+          {category_sql}
+        ORDER BY qq.id DESC
+    """
+
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                query,
+                [*document_params, *category_params],
+            )
             return cursor.fetchall()
 
 
-def get_user_seen_question_ids(
-    user_id: int,
-    document: str,
-    difficulty: str
+def build_excluded_questions(
+    category_ids: Optional[list[int]] = None,
+    document: Optional[str] = None,
 ):
-    document_ids = get_documents_scope(
-        document
-    )
-
-    with get_connection() as conn:
-
-        with conn.cursor() as cursor:
-
-            cursor.execute(
-                """
-                SELECT DISTINCT qaq.question_id
-
-                FROM quiz_attempt_questions qaq
-
-                JOIN quiz_results qr
-                    ON qaq.quiz_result_id = qr.id
-
-                JOIN quiz_questions qq
-                    ON qaq.question_id = qq.id
-
-                JOIN document_chunks dc
-                    ON qq.chunk_id = dc.id
-
-                WHERE qr.user_id = %s
-                  AND dc.document_id = ANY(%s)
-                  AND qq.difficulty = %s
-                """,
-                (
-                    user_id,
-                    document_ids,
-                    difficulty
-                )
-            )
-
-            return {
-                row[0]
-                for row in cursor.fetchall()
-            }
-
-
-def count_available_questions(
-    document: str,
-    difficulty: str,
-    user_id: int
-):
-    """
-    Retourne le nombre de questions disponibles
-    pour cet utilisateur.
-
-    Une question déjà utilisée par l'utilisateur
-    n'est plus considérée comme disponible.
-    """
-
-    document_ids = get_documents_scope(
-        document
-    )
-
-    seen_question_ids = (
-        get_user_seen_question_ids(
-            user_id=user_id,
-            document=document,
-            difficulty=difficulty
-        )
-    )
-
-    with get_connection() as conn:
-
-        with conn.cursor() as cursor:
-
-            if seen_question_ids:
-
-                cursor.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM quiz_questions qq
-
-                    JOIN document_chunks dc
-                        ON qq.chunk_id = dc.id
-
-                    WHERE dc.document_id = ANY(%s)
-                      AND qq.difficulty = %s
-                      AND NOT (qq.id = ANY(%s))
-                    """,
-                    (
-                        document_ids,
-                        difficulty,
-                        list(seen_question_ids)
-                    )
-                )
-
-            else:
-
-                cursor.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM quiz_questions qq
-
-                    JOIN document_chunks dc
-                        ON qq.chunk_id = dc.id
-
-                    WHERE dc.document_id = ANY(%s)
-                      AND qq.difficulty = %s
-                    """,
-                    (
-                        document_ids,
-                        difficulty
-                    )
-                )
-
-            return cursor.fetchone()[0]
-
-
-def get_generation_status(
-    document: str,
-    difficulty: str,
-    user_id: int,
-    requested_count: int
-):
-    """
-    Retourne l'état d'une banque de questions
-    pour permettre au frontend de suivre
-    une génération.
-    """
-
-    total_count = count_questions(
-        document,
-        difficulty
-    )
-
-    available_count = count_available_questions(
+    rows = get_existing_questions(
+        category_ids=category_ids,
         document=document,
-        difficulty=difficulty,
-        user_id=user_id
-    )
-
-    max_capacity = get_max_capacity(
-        document
-    )
-
-    target_count = min(
-        TARGET_QUESTION_COUNT,
-        max_capacity
-    )
-
-    generation_key = (
-        document,
-        difficulty
-    )
-
-    with generation_lock:
-
-        generation_active = (
-            generation_key
-            in active_generations
-        )
-
-    missing_for_quiz = max(
-        0,
-        requested_count - available_count
     )
 
     return {
-        "document": document,
-        "difficulty": difficulty,
-        "requested_count": requested_count,
-        "total_count": total_count,
-        "available_count": available_count,
-        "missing_count": missing_for_quiz,
-        "target_count": target_count,
-        "capacity": max_capacity,
-        "generation_active": generation_active,
-        "ready": (
-            available_count
-            >= requested_count
-        )
+        normalize_question(row[1])
+        for row in rows
+        if isinstance(row[1], str) and row[1].strip()
     }
 
 
-def get_quiz_generation_status(
-    document: str,
-    difficulty: str,
-    user_id: int,
-    requested_count: int
-):
-    """
-    Fonction utilisée par la route API pour suivre
-    la génération d'une banque.
-    """
+# ============================================================
+# CONTEXTE DU CHUNK CHROMADB
+# ============================================================
 
-    if difficulty not in {
-        "easy",
-        "medium",
-        "hard"
-    }:
-        raise ValueError(
-            "La difficulté doit être easy, medium ou hard."
-        )
-
-    if requested_count not in {
-        5,
-        10,
-        15,
-        20
-    }:
-        raise ValueError(
-            "Le nombre de questions doit être 5, 10, 15 ou 20."
-        )
-
-    return get_generation_status(
-        document=document,
-        difficulty=difficulty,
-        user_id=user_id,
-        requested_count=requested_count
-    )
-
-
-def get_chunk_context(
-    chroma_id: str
-):
+def get_chunk_context(chroma_id: str):
     result = collection.get(
         ids=[chroma_id],
-        include=["documents"]
+        include=["documents"],
     )
 
-    documents = result.get(
-        "documents",
-        []
-    )
+    documents = result.get("documents", [])
 
     if not documents:
-
-        raise ValueError(
-            f"Chunk introuvable dans ChromaDB : {chroma_id}"
-        )
+        raise ValueError(f"Chunk introuvable dans ChromaDB : {chroma_id}")
 
     context = documents[0]
 
-    if not isinstance(
-        context,
-        str
-    ):
-        raise ValueError(
-            "Le contenu du chunk est invalide."
-        )
+    if not isinstance(context, str):
+        raise ValueError("Le contenu du chunk est invalide.")
 
     if not context.strip():
-        raise ValueError(
-            "Le chunk ne contient aucun texte."
-        )
+        raise ValueError("Le chunk ne contient aucun texte.")
 
     return context
 
 
-def build_excluded_questions(
-    document: str,
-    difficulty: str
-):
-    existing_questions = get_existing_questions(
-        document,
-        difficulty
-    )
-
-    return {
-        normalize_question(
-            question[1]
-        )
-        for question in existing_questions
-    }
-
+# ============================================================
+# GÉNÉRATION LLM
+# ============================================================
 
 def generate_quiz_batch(
     context: str,
     difficulty: str,
+    category_name: Optional[str],
     excluded_questions: set[str],
-    batch_size: int = BATCH_SIZE
+    batch_size: int = BATCH_SIZE,
 ):
-    last_error = None
+    validate_difficulty(difficulty)
 
-    for attempt in range(
-        1,
-        MAX_ATTEMPTS + 1
-    ):
+    if not isinstance(context, str) or not context.strip():
+        raise ValueError("Le contenu source est vide.")
 
-        variation_instructions = [
-            """
-Change complètement l'angle des questions.
-Ne demande pas simplement une définition.
-""",
-            """
-Pose des questions sur les conséquences,
-les objectifs, les caractéristiques ou les mécanismes.
-""",
-            """
-Utilise des situations concrètes de cybersécurité
-lorsque le contenu source le permet.
-""",
-            """
-Cherche des détails précis du contenu source
-qui n'ont pas encore été utilisés.
-""",
-            """
-Évite absolument les questions classiques
-ou déjà vues et cherche un autre aspect du contenu.
-""",
-            """
-Varie fortement la formulation et le concept testé.
-Ne reformule pas une question précédente.
-""",
-            """
-Utilise uniquement des informations précises
-du contenu source mais explore un nouvel aspect.
-""",
-            """
-Construis des questions différentes des questions
-habituelles sur ce sujet.
-""",
-            """
-Cherche un détail secondaire du contenu source
-pour construire la question.
-""",
-            """
-Dernière tentative : produis des questions
-totalement nouvelles et non redondantes.
-"""
-        ]
+    if batch_size < 1:
+        raise ValueError("Le nombre de questions demandé doit être positif.")
 
-        variation_instruction = (
-            variation_instructions[
-                min(
-                    attempt - 1,
-                    len(variation_instructions) - 1
-                )
-            ]
-        )
+    category_instruction = (
+        category_name if category_name else "Aucune catégorie spécifique"
+    )
 
-        prompt = f"""
-Tu es un expert en cybersécurité chargé de créer
-des questions à choix multiple.
+    # Une sélection évite d'envoyer une liste gigantesque au modèle.
+    # La sauvegarde PostgreSQL vérifie elle aussi chaque doublon.
+    excluded_sample = sorted(excluded_questions)[:60]
+
+    prompt = f"""
+Tu es un expert chargé de créer des questions de cybersécurité
+à partir d'un document source.
 
 CONTENU SOURCE :
 {context}
 
-DIFFICULTÉ :
+CATÉGORIE :
+{category_instruction}
+
+DIFFICULTÉ DEMANDÉE :
 {difficulty}
 
-NOMBRE DE QUESTIONS :
+NOMBRE MAXIMAL DE QUESTIONS :
 {batch_size}
 
-Tu dois générer exactement {batch_size} question(s).
+DÉFINITION DES DIFFICULTÉS :
+- easy : compréhension directe d'une information présente dans le document.
+- medium : compréhension et interprétation d'informations du document.
+- hard : analyse ou mise en relation d'informations du document,
+  sans connaissances externes ni informations inventées.
 
-FORMAT OBLIGATOIRE :
+RÈGLE FONDAMENTALE :
+Utilise UNIQUEMENT les informations présentes dans le contenu source.
+N'ajoute aucune connaissance externe et n'invente aucun fait.
+Si le contenu est insuffisant, retourne uniquement les questions fiables.
+Si aucune question fiable n'est possible, retourne {{"questions": []}}.
 
+FORMAT JSON OBLIGATOIRE :
 {{
   "questions": [
     {{
@@ -804,213 +674,208 @@ FORMAT OBLIGATOIRE :
         "Réponse D"
       ],
       "correct_answer": 0,
-      "explanation": "Explication..."
+      "explanation": "Explication fondée sur le contenu source."
     }}
   ]
 }}
 
-RÈGLES ABSOLUES :
+RÈGLES DE VALIDATION :
+1. Retourne uniquement un objet JSON valide, sans Markdown.
+2. "questions" doit être une liste.
+3. Génère au maximum {batch_size} questions.
+4. Chaque question doit avoir un texte non vide.
+5. Chaque question doit contenir exactement quatre options.
+6. Les quatre options doivent être différentes et non vides.
+7. Une seule option est correcte.
+8. "correct_answer" est l'index de la bonne option : 0, 1, 2 ou 3.
+9. "explanation" doit être non vide et justifiée par le document.
+10. Respecte strictement la difficulté demandée.
+11. N'utilise aucune connaissance externe.
+12. Écris dans la langue du document.
 
-1. Retourne uniquement du JSON.
-2. N'utilise jamais de Markdown.
-3. Ne mets jamais le JSON dans ```json.
-4. "questions" doit être une liste.
-5. Chaque question doit contenir exactement 4 options.
-6. Les 4 options doivent être différentes.
-7. "correct_answer" doit être un entier : 0, 1, 2 ou 3.
-8. L'option située à l'index correct_answer doit être la seule bonne réponse.
-9. "explanation" doit expliquer clairement la bonne réponse.
-10. Les questions doivent être basées uniquement sur le contenu source fourni.
-11. Ne crée aucune information absente du contenu source.
-12. La difficulté demandée doit être respectée.
-13. Les questions doivent être réellement différentes entre elles.
-14. Ne reformule pas simplement la même question.
-15. Les options doivent être cohérentes avec la question.
-16. La question et ses options doivent être rédigées dans la même langue que le contenu source.
-17. Si la question demande un terme anglais, une option doit réellement contenir ce terme anglais.
-18. Ne mets jamais une réponse qui contredit directement la question.
-19. Ne mets jamais plusieurs réponses correctes.
-20. Ne mets jamais une option vide.
-21. Ne répète pas une question déjà générée.
-22. Chaque question doit tester un aspect différent du contenu source.
-23. Ne produis pas deux questions qui demandent essentiellement
-    la même information.
-24. Si une information a déjà été utilisée sous une forme
-    évidente, choisis une autre information du contenu source.
-
-INSTRUCTION DE VARIATION :
-
-{variation_instruction}
-
-IMPORTANT :
-
-Le programme vérifiera lui-même les doublons.
-
-Tu dois donc produire des questions nouvelles,
-même si le contenu source est court.
-
-Ne cherche pas à remplir artificiellement la quantité
-demandée avec des reformulations.
+QUESTIONS DÉJÀ UTILISÉES À NE PAS REPRODUIRE :
+{json.dumps(excluded_sample, ensure_ascii=False)}
 
 Retourne uniquement l'objet JSON final.
 """
 
+    last_error = None
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        retry_prompt = prompt
+
+        if attempt > 1:
+            retry_prompt += f"""
+
+CORRECTION DE TA RÉPONSE PRÉCÉDENTE :
+La tentative précédente n'a pas produit de lot exploitable.
+Erreur détectée : {last_error}
+
+Recommence en corrigeant ce problème.
+Vérifie le JSON, les quatre options, l'index de la bonne réponse
+et l'explication. N'ajoute aucun texte hors JSON.
+"""
+
         try:
-
-            response = llm.invoke(
-                prompt
-            )
-
-            questions = parse_quiz_response(
-                response
-            )
+            response = llm.invoke(retry_prompt)
+            questions = parse_quiz_response(response)
 
             valid_questions = []
-
-            local_questions = set(
-                excluded_questions
-            )
+            local_questions = set(excluded_questions)
+            rejected_count = 0
+            rejection_reasons = {}
 
             for question in questions:
+                validation_error = get_question_validation_error(question)
 
-                normalized = normalize_question(
-                    question["question"]
-                )
-
-                if normalized in local_questions:
-
-                    print(
-                        f"[Quiz] "
-                        f"Tentative {attempt}/{MAX_ATTEMPTS} : "
-                        f"question déjà existante rejetée."
+                if validation_error is not None:
+                    rejected_count += 1
+                    rejection_reasons[validation_error] = (
+                        rejection_reasons.get(validation_error, 0) + 1
                     )
-
                     continue
 
-                local_questions.add(
-                    normalized
-                )
+                normalized = normalize_question(question["question"])
 
-                valid_questions.append(
-                    question
-                )
+                if normalized in local_questions:
+                    rejected_count += 1
+                    reason = "Question déjà utilisée."
+                    rejection_reasons[reason] = (
+                        rejection_reasons.get(reason, 0) + 1
+                    )
+                    continue
 
-                if len(
-                    valid_questions
-                ) >= batch_size:
+                local_questions.add(normalized)
+                valid_questions.append(question)
 
+                if len(valid_questions) >= batch_size:
                     break
 
             if valid_questions:
+                if rejected_count:
+                    print(
+                        "[QUIZ] "
+                        f"{rejected_count} question(s) rejetée(s)."
+                    )
+
+                    for reason, count in rejection_reasons.items():
+                        print(f"[QUIZ] Rejet ({count}) : {reason}")
+
+                if len(valid_questions) < batch_size:
+                    print(
+                        "[QUIZ] Lot partiel accepté : "
+                        f"{len(valid_questions)}/{batch_size} question(s)."
+                    )
 
                 return valid_questions
 
-            last_error = (
-                "Le LLM a retourné des questions "
-                "mais elles étaient toutes déjà présentes."
-            )
+            if not questions:
+                last_error = "Le LLM a retourné une liste de questions vide."
+            else:
+                last_error = (
+                    f"Aucune question exploitable parmi {len(questions)}. "
+                    f"Motifs : {rejection_reasons}"
+                )
 
             print(
-                f"[Quiz] "
-                f"Tentative {attempt}/{MAX_ATTEMPTS} : "
-                f"aucune nouvelle question."
+                f"[QUIZ] Tentative {attempt}/{MAX_ATTEMPTS} : {last_error}"
             )
 
         except Exception as error:
-
-            last_error = str(
-                error
-            )
-
+            last_error = str(error)
             print(
-                f"Erreur génération quiz "
-                f"(tentative {attempt}/{MAX_ATTEMPTS}) : "
-                f"{error}"
+                "[QUIZ] Erreur de génération "
+                f"(tentative {attempt}/{MAX_ATTEMPTS}) : {last_error}"
             )
 
     raise ValueError(
-        "Impossible de générer un lot de questions valide."
-        + (
-            f" Dernière erreur : {last_error}"
-            if last_error
-            else ""
-        )
+        "Impossible de générer un lot de questions valide. "
+        f"Dernière erreur : {last_error}"
     )
 
+
+# ============================================================
+# SAUVEGARDE DES QUESTIONS
+# ============================================================
 
 def save_questions(
     chunk_id: int,
     questions,
-    difficulty: str
+    difficulty: str,
 ):
+    """Sauvegarde avec limites par chunk et contrôle des doublons."""
+    validate_difficulty(difficulty)
     saved_questions = []
 
     with get_connection() as conn:
-
         with conn.cursor() as cursor:
-
+            # Verrouille le chunk afin de limiter les dépassements concurrents.
             cursor.execute(
                 """
-                SELECT id
+                SELECT document_id, category_id, question_limit
                 FROM document_chunks
                 WHERE id = %s
+                FOR UPDATE
                 """,
-                (chunk_id,)
+                (chunk_id,),
             )
 
-            chunk_exists = (
-                cursor.fetchone()
-                is not None
-            )
+            chunk = cursor.fetchone()
 
-            if not chunk_exists:
+            if chunk is None:
+                raise ValueError(f"Chunk introuvable en base : {chunk_id}")
 
-                print(
-                    f"[Quiz] "
-                    f"Chunk {chunk_id} introuvable "
-                    f"dans document_chunks. "
-                    f"Il a probablement été supprimé "
-                    f"ou recréé pendant la génération. "
-                    f"Lot ignoré."
+            document_id, category_id, configured_limit = chunk
+
+            # Un QCM de banque doit toujours hériter d'une vraie catégorie.
+            if category_id is None:
+                raise ValueError(
+                    f"Chunk {chunk_id} sans catégorie : "
+                    "impossible de créer des QCM."
                 )
 
-                return []
+            if configured_limit is None or configured_limit <= 0:
+                configured_limit = TOTAL_QUESTION_LIMIT_PER_CHUNK
+
+            total_limit = min(
+                configured_limit,
+                TOTAL_QUESTION_LIMIT_PER_CHUNK,
+            )
+
+            per_difficulty_limit = min(
+                total_limit,
+                QUESTION_LIMIT_PER_CHUNK,
+            )
 
             for question in questions:
+                if not is_valid_generated_question(question):
+                    print("[BANK] Question rejetée : format invalide.")
+                    continue
 
-                normalized = normalize_question(
-                    question["question"]
-                )
+                normalized = normalize_question(question["question"])
 
+                # Les doublons sont vérifiés à l'échelle du document,
+                # pas seulement dans la catégorie courante.
                 cursor.execute(
                     """
-                    SELECT question
-                    FROM quiz_questions
-                    WHERE chunk_id = %s
-                      AND difficulty = %s
+                    SELECT 1
+                    FROM quiz_questions qq
+                    JOIN document_chunks dc ON qq.chunk_id = dc.id
+                    WHERE dc.document_id = %s
+                      AND LOWER(
+                          REGEXP_REPLACE(
+                              TRIM(qq.question),
+                              '[[:space:]]+',
+                              ' ',
+                              'g'
+                          )
+                      ) = %s
+                    LIMIT 1
                     """,
-                    (
-                        chunk_id,
-                        difficulty
-                    )
+                    (document_id, normalized),
                 )
 
-                existing_questions = (
-                    cursor.fetchall()
-                )
-
-                duplicate = False
-
-                for row in existing_questions:
-
-                    if normalize_question(
-                        row[0]
-                    ) == normalized:
-
-                        duplicate = True
-                        break
-
-                if duplicate:
+                if cursor.fetchone() is not None:
                     continue
 
                 cursor.execute(
@@ -1020,40 +885,24 @@ def save_questions(
                     WHERE chunk_id = %s
                       AND difficulty = %s
                     """,
-                    (
-                        chunk_id,
-                        difficulty
-                    )
+                    (chunk_id, difficulty),
                 )
+                difficulty_count = cursor.fetchone()[0]
 
-                current_count = (
-                    cursor.fetchone()[0]
-                )
-
-                if (
-                    current_count
-                    >= QUESTION_LIMIT_PER_CHUNK
-                ):
+                if difficulty_count >= per_difficulty_limit:
                     continue
 
                 cursor.execute(
                     """
-                    SELECT id
-                    FROM document_chunks
-                    WHERE id = %s
+                    SELECT COUNT(*)
+                    FROM quiz_questions
+                    WHERE chunk_id = %s
                     """,
-                    (chunk_id,)
+                    (chunk_id,),
                 )
+                total_count = cursor.fetchone()[0]
 
-                if cursor.fetchone() is None:
-
-                    print(
-                        f"[Quiz] "
-                        f"Chunk {chunk_id} supprimé "
-                        f"avant l'insertion. "
-                        f"Question ignorée."
-                    )
-
+                if total_count >= total_limit:
                     continue
 
                 cursor.execute(
@@ -1066,14 +915,7 @@ def save_questions(
                         explanation,
                         difficulty
                     )
-                    VALUES (
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s
-                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
@@ -1081,106 +923,134 @@ def save_questions(
                         question["question"],
                         json.dumps(
                             question["options"],
-                            ensure_ascii=False
+                            ensure_ascii=False,
                         ),
-                        str(
-                            question["correct_answer"]
-                        ),
+                        str(question["correct_answer"]),
                         question["explanation"],
-                        difficulty
+                        difficulty,
+                    ),
+                )
+
+                question_id = cursor.fetchone()[0]
+
+                # Le compteur est toujours recalculé depuis la table des questions.
+                cursor.execute(
+                    """
+                    UPDATE document_chunks
+                    SET question_count = (
+                        SELECT COUNT(*)
+                        FROM quiz_questions
+                        WHERE chunk_id = %s
                     )
+                    WHERE id = %s
+                    """,
+                    (chunk_id, chunk_id),
                 )
 
-                question_id = (
-                    cursor.fetchone()[0]
-                )
-
-                saved_questions.append(
-                    {
-                        "id": question_id,
-                        "question": question["question"],
-                        "options": question["options"],
-                        "correct_answer": question["correct_answer"],
-                        "explanation": question["explanation"],
-                        "difficulty": difficulty
-                    }
-                )
+                saved_questions.append({
+                    "id": question_id,
+                    "question": question["question"],
+                    "options": question["options"],
+                    "correct_answer": question["correct_answer"],
+                    "explanation": question["explanation"],
+                    "difficulty": difficulty,
+                })
 
             conn.commit()
 
     return saved_questions
 
 
+# ============================================================
+# GÉNÉRATION D'UNE BANQUE
+# ============================================================
+
 def generate_questions_for_bank(
     document: str,
     difficulty: str,
     target_count: int,
-    progress_callback: Callable[[int], None] | None = None,
-    background: bool = True
+    category_ids: Optional[list[int]] = None,
+    progress_callback=None,
+    continue_callback=None,
 ):
-    """
-    Génère progressivement la banque d'une difficulté.
+    validate_difficulty(difficulty)
+    category_ids = validate_category_ids(category_ids)
+    document_ids = get_documents_scope(document)
+    category_sql, category_params = get_category_filter_sql(category_ids)
 
-    Un échec du LLM sur un chunk ne bloque pas
-    les autres chunks.
+    # PostgreSQL reste la source de vérité au démarrage de chaque tâche.
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM quiz_questions qq
+                JOIN document_chunks dc ON qq.chunk_id = dc.id
+                WHERE dc.document_id = ANY(%s)
+                  AND qq.difficulty = %s
+                  AND dc.category_id IS NOT NULL
+                  {category_sql}
+                """,
+                [
+                    document_ids,
+                    difficulty,
+                    *category_params,
+                ],
+            )
+            generated_count = cursor.fetchone()[0]
 
-    Les lots peuvent être partiels.
-
-    La génération s'arrête uniquement lorsqu'il n'existe
-    plus de capacité disponible ou lorsque plusieurs
-    passages complets n'ont produit aucune nouvelle
-    question.
-    """
-
-    generated_count = count_questions(
-        document,
-        difficulty
+    target_count = min(
+        max(0, target_count),
+        TARGET_QUESTION_COUNT,
     )
 
     print(
-        f"[{difficulty.upper()}] "
-        f"Banque actuelle : "
+        f"[BANK][{difficulty.upper()}] "
         f"{generated_count}/{target_count}"
     )
 
     if progress_callback is not None:
-
-        progress_callback(
-            generated_count
-        )
+        progress_callback(generated_count, target_count)
 
     empty_passes = 0
+    failed_chunks = set()
 
     while generated_count < target_count:
-
         chunks = get_available_chunks(
-            document,
-            difficulty
+            document=document,
+            difficulty=difficulty,
+            category_ids=category_ids,
         )
 
         if not chunks:
-
-            print(
-                f"[{difficulty.upper()}] "
-                f"Aucun chunk disponible."
-            )
-
             break
 
         generated_in_pass = False
+        attempted_in_pass = 0
 
         for chunk in chunks:
+            task_manager.wait_for_background_permission()
+
+            if continue_callback is not None and not continue_callback():
+                print(
+                    f"[BANK][{difficulty.upper()}] "
+                    "Document supprimé ; arrêt de la génération."
+                )
+                return generated_count
 
             if generated_count >= target_count:
                 break
 
             chunk_id = chunk[0]
             chroma_id = chunk[1]
-            difficulty_count = chunk[2]
+            chunk_category_id = chunk[2]
+            difficulty_count = chunk[3]
+
+            if chunk_id in failed_chunks:
+                continue
 
             remaining_capacity = (
-                QUESTION_LIMIT_PER_CHUNK
-                - difficulty_count
+                QUESTION_LIMIT_PER_CHUNK - difficulty_count
             )
 
             if remaining_capacity <= 0:
@@ -1189,730 +1059,503 @@ def generate_questions_for_bank(
             batch_size = min(
                 BATCH_SIZE,
                 remaining_capacity,
-                target_count - generated_count
+                target_count - generated_count,
             )
 
+            attempted_in_pass += 1
+
             try:
+                context = get_chunk_context(chroma_id)
 
-                context = get_chunk_context(
-                    chroma_id
+                if chunk_category_id is None:
+                    failed_chunks.add(chunk_id)
+                    print(
+                        f"[BANK][{difficulty.upper()}] "
+                        f"Chunk {chunk_id} ignoré : aucune catégorie."
+                    )
+                    continue
+
+                category = get_category_by_id(chunk_category_id)
+
+                if not category:
+                    failed_chunks.add(chunk_id)
+                    print(
+                        f"[BANK][{difficulty.upper()}] "
+                        f"Chunk {chunk_id} ignoré : "
+                        f"catégorie {chunk_category_id} introuvable."
+                    )
+                    continue
+
+                # Exclut les questions de tout le document, toutes catégories confondues.
+                excluded_questions = build_excluded_questions(
+                    document=document,
                 )
 
-                excluded_questions = (
-                    build_excluded_questions(
-                        document,
-                        difficulty
-                    )
-                )
-
-                if background:
-
-                    print(
-                        f"[{difficulty.upper()}] "
-                        f"Vérification des priorités avant "
-                        f"génération du chunk {chunk_id}..."
-                    )
-
-                    task_manager.wait_for_background_permission()
-
-                    print(
-                        f"[{difficulty.upper()}] "
-                        f"Aucune requête prioritaire active. "
-                        f"Génération du chunk {chunk_id}."
-                    )
+                task_manager.wait_for_background_permission()
 
                 questions = generate_quiz_batch(
                     context=context,
                     difficulty=difficulty,
+                    category_name=category["name"],
                     excluded_questions=excluded_questions,
-                    batch_size=batch_size
+                    batch_size=batch_size,
                 )
 
-                questions = questions[
-                    :batch_size
-                ]
+                task_manager.wait_for_background_permission()
+
+                if continue_callback is not None and not continue_callback():
+                    print(
+                        f"[BANK][{difficulty.upper()}] "
+                        "Document supprimé après génération ; "
+                        "questions non enregistrées."
+                    )
+                    return generated_count
 
                 saved_questions = save_questions(
                     chunk_id=chunk_id,
-                    questions=questions,
-                    difficulty=difficulty
+                    questions=questions[:batch_size],
+                    difficulty=difficulty,
                 )
 
                 if saved_questions:
-
-                    generated_count += len(
-                        saved_questions
+                    # Recompte après insertion, sans supposer que toutes les
+                    # questions proposées ont effectivement été enregistrées.
+                    generated_count = count_questions(
+                        difficulty=difficulty,
+                        category_ids=category_ids,
+                        document=document,
                     )
+
+                    if progress_callback is not None:
+                        progress_callback(generated_count, target_count)
 
                     generated_in_pass = True
 
                     print(
-                        f"[{difficulty.upper()}] "
-                        f"+{len(saved_questions)} "
-                        f"questions "
+                        f"[BANK][{difficulty.upper()}] "
+                        f"Catégorie={category['name']} "
+                        f"Chunk={chunk_id} +{len(saved_questions)} "
                         f"→ {generated_count}/{target_count}"
                     )
-
-                    if progress_callback is not None:
-
-                        progress_callback(
-                            generated_count
-                        )
+                else:
+                    failed_chunks.add(chunk_id)
+                    print(
+                        f"[BANK][{difficulty.upper()}] "
+                        f"Chunk {chunk_id} ignoré : aucune question sauvegardée "
+                        "(doublons ou limite atteinte)."
+                    )
 
             except Exception as error:
-
+                failed_chunks.add(chunk_id)
                 print(
-                    f"[{difficulty.upper()}] "
-                    f"Chunk {chunk_id} ignoré : "
-                    f"{error}"
+                    f"[BANK][{difficulty.upper()}] "
+                    f"Chunk {chunk_id} ignoré : {error}"
                 )
-
                 continue
 
         if generated_in_pass:
-
             empty_passes = 0
-
         else:
-
             empty_passes += 1
 
             print(
-                f"[{difficulty.upper()}] "
-                f"Aucune nouvelle question "
-                f"pendant ce passage "
-                f"({empty_passes}/{MAX_EMPTY_PASSES})."
+                f"[BANK][{difficulty.upper()}] "
+                f"Aucune progression ({empty_passes}/{MAX_EMPTY_PASSES})."
             )
 
-            if empty_passes >= MAX_EMPTY_PASSES:
+            remaining_chunks = [
+                chunk
+                for chunk in chunks
+                if chunk[0] not in failed_chunks
+            ]
 
+            if not remaining_chunks:
                 print(
-                    f"[{difficulty.upper()}] "
-                    f"Arrêt de sécurité : "
-                    f"aucune progression après "
-                    f"{MAX_EMPTY_PASSES} passages."
+                    f"[BANK][{difficulty.upper()}] "
+                    "Arrêt : aucun chunk encore exploitable."
                 )
+                break
 
+            if empty_passes >= MAX_EMPTY_PASSES:
+                break
+
+            if attempted_in_pass == 0:
                 break
 
     print(
-        f"[{difficulty.upper()}] "
-        f"Banque terminée : "
-        f"{generated_count} questions"
+        f"[BANK][{difficulty.upper()}] "
+        f"Fin de génération : {generated_count}/{target_count}."
     )
-
-    if progress_callback is not None:
-
-        progress_callback(
-            generated_count
-        )
 
     return generated_count
 
-def get_random_questions(
-    document: str,
-    difficulty: str,
-    question_count: int,
-    user_id: int
-):
-    document_ids = get_documents_scope(
-        document
-    )
 
-    seen_question_ids = (
-        get_user_seen_question_ids(
-            user_id=user_id,
-            document=document,
-            difficulty=difficulty
-        )
-    )
+# ============================================================
+# QUESTIONS DÉJÀ VUES PAR UN UTILISATEUR
+# ============================================================
+
+def get_user_seen_question_ids(
+    user_id: int,
+    difficulty: str,
+    category_ids: Optional[list[int]] = None,
+):
+    validate_difficulty(difficulty)
+    category_ids = validate_category_ids(category_ids)
+    category_sql, category_params = get_category_filter_sql(category_ids)
+
+    query = f"""
+        SELECT DISTINCT qaq.question_id
+        FROM quiz_attempt_questions qaq
+        JOIN quiz_results qr ON qaq.quiz_result_id = qr.id
+        JOIN quiz_questions qq ON qaq.question_id = qq.id
+        JOIN document_chunks dc ON qq.chunk_id = dc.id
+        WHERE qr.user_id = %s
+          AND qq.difficulty = %s
+          {category_sql}
+    """
+
+    params = [
+        user_id,
+        difficulty,
+        *category_params,
+    ]
 
     with get_connection() as conn:
-
         with conn.cursor() as cursor:
+            cursor.execute(query, params)
+            return {
+                row[0]
+                for row in cursor.fetchall()
+            }
 
-            if seen_question_ids:
 
-                cursor.execute(
-                    """
-                    SELECT
-                        qq.id,
-                        qq.question,
-                        qq.options,
-                        qq.correct_answer,
-                        qq.difficulty
-                    FROM quiz_questions qq
+# ============================================================
+# RÉCUPÉRATION ALÉATOIRE DE QUESTIONS
+# ============================================================
 
-                    JOIN document_chunks dc
-                        ON qq.chunk_id = dc.id
+def get_random_questions(
+    difficulty: str,
+    question_count: int,
+    user_id: int,
+    category_ids: Optional[list[int]] = None,
+):
+    validate_difficulty(difficulty)
+    category_ids = validate_category_ids(category_ids)
 
-                    WHERE dc.document_id = ANY(%s)
-                      AND qq.difficulty = %s
-                      AND NOT (qq.id = ANY(%s))
+    seen_question_ids = get_user_seen_question_ids(
+        user_id=user_id,
+        difficulty=difficulty,
+        category_ids=category_ids,
+    )
 
-                    ORDER BY RANDOM()
+    category_sql, category_params = get_category_filter_sql(category_ids)
 
-                    LIMIT %s
-                    """,
-                    (
-                        document_ids,
-                        difficulty,
-                        list(seen_question_ids),
-                        question_count
-                    )
-                )
+    query = f"""
+        SELECT
+            qq.id,
+            qq.question,
+            qq.options,
+            qq.difficulty
+        FROM quiz_questions qq
+        JOIN document_chunks dc ON qq.chunk_id = dc.id
+        WHERE qq.difficulty = %s
+          {category_sql}
+    """
 
-            else:
+    params = [
+        difficulty,
+        *category_params,
+    ]
 
-                cursor.execute(
-                    """
-                    SELECT
-                        qq.id,
-                        qq.question,
-                        qq.options,
-                        qq.correct_answer,
-                        qq.difficulty
-                    FROM quiz_questions qq
+    if seen_question_ids:
+        query += " AND NOT (qq.id = ANY(%s))"
+        params.append(list(seen_question_ids))
 
-                    JOIN document_chunks dc
-                        ON qq.chunk_id = dc.id
+    query += """
+        ORDER BY RANDOM()
+        LIMIT %s
+    """
+    params.append(question_count)
 
-                    WHERE dc.document_id = ANY(%s)
-                      AND qq.difficulty = %s
-
-                    ORDER BY RANDOM()
-
-                    LIMIT %s
-                    """,
-                    (
-                        document_ids,
-                        difficulty,
-                        question_count
-                    )
-                )
-
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, params)
             rows = cursor.fetchall()
 
     questions = []
 
     for row in rows:
-
-        question_id = row[0]
-        question_text = row[1]
         options = row[2]
-        correct_answer = row[3]
-        row_difficulty = row[4]
 
-        if isinstance(
-            options,
-            str
-        ):
+        if isinstance(options, str):
+            options = json.loads(options)
 
-            try:
-
-                options = json.loads(
-                    options
-                )
-
-            except json.JSONDecodeError:
-
-                print(
-                    f"[QUIZ] Question {question_id} ignorée : "
-                    f"options JSON invalides."
-                )
-
-                continue
-
-        if not isinstance(
-            options,
-            list
-        ):
-
-            print(
-                f"[QUIZ] Question {question_id} ignorée : "
-                f"les options ne sont pas une liste."
-            )
-
-            continue
-
-        if len(options) != 4:
-
-            print(
-                f"[QUIZ] Question {question_id} ignorée : "
-                f"{len(options)} options trouvées au lieu de 4."
-            )
-
-            continue
-
-        if not all(
-            isinstance(option, str)
-            and option.strip()
-            for option in options
-        ):
-
-            print(
-                f"[QUIZ] Question {question_id} ignorée : "
-                f"une ou plusieurs options sont invalides."
-            )
-
-            continue
-
-        normalized_options = [
-            normalize_question(option)
-            for option in options
-        ]
-
-        if len(
-            set(normalized_options)
-        ) != 4:
-
-            print(
-                f"[QUIZ] Question {question_id} ignorée : "
-                f"les 4 options ne sont pas différentes."
-            )
-
-            continue
-
-        try:
-
-            correct_answer = int(
-                correct_answer
-            )
-
-        except (
-            TypeError,
-            ValueError
-        ):
-
-            print(
-                f"[QUIZ] Question {question_id} ignorée : "
-                f"correct_answer invalide."
-            )
-
-            continue
-
-        if correct_answer not in {
-            0,
-            1,
-            2,
-            3
-        }:
-
-            print(
-                f"[QUIZ] Question {question_id} ignorée : "
-                f"correct_answer={correct_answer} invalide."
-            )
-
-            continue
-
-        questions.append(
-            {
-                "id": question_id,
-                "question": question_text,
-                "options": options,
-                "correct_answer": correct_answer,
-                "difficulty": row_difficulty
-            }
-        )
-
-    if len(questions) < question_count:
-
-        raise ValueError(
-            "Impossible de constituer un quiz avec "
-            f"{question_count} questions valides à 4 options. "
-            f"{len(questions)} question(s) valide(s) seulement."
-        )
+        questions.append({
+            "id": row[0],
+            "question": row[1],
+            "options": options,
+            "difficulty": row[3],
+        })
 
     return questions
 
-def get_mixed_quiz_questions(
-    document: str,
-    primary_difficulty: str,
-    fallback_difficulty: str,
-    question_count: int,
-    user_id: int
-):
-    """
-    Construit un quiz en utilisant d'abord les questions
-    disponibles de la difficulté demandée puis complète
-    avec une autre difficulté.
-    """
 
-    if primary_difficulty == fallback_difficulty:
-
-        raise ValueError(
-            "Les deux difficultés doivent être différentes."
-        )
-
-    primary_questions = get_random_questions(
-        document=document,
-        difficulty=primary_difficulty,
-        question_count=question_count,
-        user_id=user_id
-    )
-
-    if len(primary_questions) >= question_count:
-
-        return primary_questions[
-            :question_count
-        ]
-
-    missing_count = (
-        question_count
-        - len(primary_questions)
-    )
-
-    fallback_questions = get_random_questions(
-        document=document,
-        difficulty=fallback_difficulty,
-        question_count=missing_count,
-        user_id=user_id
-    )
-
-    if len(fallback_questions) < missing_count:
-
-        raise ValueError(
-            "La difficulté choisie ne contient pas "
-            "assez de questions non vues pour compléter le quiz."
-        )
-
-    questions = (
-        primary_questions
-        + fallback_questions
-    )
-
-    return questions[
-        :question_count
-    ]
-
-
-def get_mixed_difficulty_options(
-    document: str,
-    primary_difficulty: str,
-    question_count: int,
-    user_id: int
-):
-    """
-    Retourne les difficultés alternatives capables
-    de compléter le quiz.
-    """
-
-    difficulties = [
-        "easy",
-        "medium",
-        "hard"
-    ]
-
-    options = []
-
-    primary_available = count_available_questions(
-        document=document,
-        difficulty=primary_difficulty,
-        user_id=user_id
-    )
-
-    missing_count = max(
-        0,
-        question_count - primary_available
-    )
-
-    for difficulty in difficulties:
-
-        if difficulty == primary_difficulty:
-            continue
-
-        available = count_available_questions(
-            document=document,
-            difficulty=difficulty,
-            user_id=user_id
-        )
-
-        if available >= missing_count:
-
-            options.append(
-                {
-                    "difficulty": difficulty,
-                    "available_count": available,
-                    "questions_needed": missing_count
-                }
-            )
-
-    return options
-
+# ============================================================
+# VÉRIFICATION D'UNE RÉPONSE
+# ============================================================
 
 def check_quiz_answer(
     question_id: int,
-    answer: int
+    answer: int,
 ):
-    if answer not in {
-        0,
-        1,
-        2,
-        3
-    }:
-
+    if (
+        not isinstance(answer, int)
+        or isinstance(answer, bool)
+        or answer not in {0, 1, 2, 3}
+    ):
         raise ValueError(
             "La réponse doit être un entier compris entre 0 et 3."
         )
 
     with get_connection() as conn:
-
         with conn.cursor() as cursor:
-
             cursor.execute(
                 """
-                SELECT
-                    correct_answer,
-                    explanation
+                SELECT correct_answer, explanation
                 FROM quiz_questions
                 WHERE id = %s
                 """,
-                (question_id,)
+                (question_id,),
             )
-
             result = cursor.fetchone()
 
     if result is None:
+        raise ValueError("Question introuvable.")
 
-        raise ValueError(
-            "Question introuvable."
-        )
-
-    correct_answer = int(
-        result[0]
-    )
-
-    explanation = result[1]
+    correct_answer = int(result[0])
 
     return {
-        "is_correct": (
-            answer == correct_answer
-        ),
+        "is_correct": answer == correct_answer,
         "correct_answer": correct_answer,
-        "explanation": explanation
+        "explanation": result[1],
     }
 
 
-def generate_mixed_quiz(
-    document: str,
-    question_count: int,
-    primary_difficulty: str,
-    secondary_difficulty: str,
-    user_id: int
+# ============================================================
+# ÉTAT D'UNE BANQUE
+# ============================================================
+
+def ensure_bank(
+    difficulty: str,
+    category_ids: Optional[list[int]] = None,
 ):
-    """
-    Génère immédiatement un quiz mixte.
+    validate_difficulty(difficulty)
+    category_ids = validate_category_ids(category_ids)
 
-    La difficulté principale est utilisée en priorité.
-    Si elle ne contient pas suffisamment de questions
-    non vues, la difficulté secondaire complète le quiz.
+    current_count = count_questions(
+        difficulty=difficulty,
+        category_ids=category_ids,
+    )
 
-    Cette fonction ne lance jamais Ollama.
-    """
+    capacity = get_max_capacity(
+        difficulty=difficulty,
+        category_ids=category_ids,
+    )
 
-    task_manager.start_user_request()
+    target = min(TARGET_QUESTION_COUNT, capacity)
 
-    try:
+    return {
+        "current": current_count,
+        "target": target,
+        "capacity": capacity,
+        "complete": current_count >= target,
+        "remaining": max(0, target - current_count),
+    }
 
-        if question_count not in {
-            5,
-            10,
-            15,
-            20
-        }:
 
-            raise ValueError(
-                "Le nombre de questions doit être 5, 10, 15 ou 20."
-            )
-
-        valid_difficulties = {
-            "easy",
-            "medium",
-            "hard"
-        }
-
-        if primary_difficulty not in valid_difficulties:
-
-            raise ValueError(
-                "La difficulté principale doit être easy, medium ou hard."
-            )
-
-        if secondary_difficulty not in valid_difficulties:
-
-            raise ValueError(
-                "La difficulté secondaire doit être easy, medium ou hard."
-            )
-
-        if primary_difficulty == secondary_difficulty:
-
-            raise ValueError(
-                "Les deux difficultés doivent être différentes."
-            )
-
-        max_capacity = get_max_capacity(
-            document
-        )
-
-        if max_capacity == 0:
-
-            raise ValueError(
-                "Aucun chunk disponible pour ce document."
-            )
-
-        questions = get_mixed_quiz_questions(
-            document=document,
-            primary_difficulty=primary_difficulty,
-            fallback_difficulty=secondary_difficulty,
-            question_count=question_count,
-            user_id=user_id
-        )
-
-        if len(questions) != question_count:
-
-            raise ValueError(
-                "Impossible de constituer un quiz complet "
-                "avec les difficultés sélectionnées."
-            )
-
-        return {
-            "status": "ready",
-            "questions": questions
-        }
-
-    finally:
-
-        task_manager.end_user_request()
-
+# ============================================================
+# QUIZ UTILISATEUR
+# ============================================================
 
 def generate_quiz(
-    document: str,
     question_count: int,
     difficulty: str,
-    user_id: int
+    user_id: int,
+    category_ids: Optional[list[int]] = None,
 ):
-    """
-    Récupère uniquement les questions déjà disponibles.
+    validate_question_count(question_count)
+    validate_difficulty(difficulty)
+    category_ids = validate_category_ids(category_ids)
 
-    Cette fonction ne lance plus Ollama.
-
-    Si le nombre de questions non vues est insuffisant,
-    elle retourne une réponse structurée permettant au
-    frontend de proposer :
-
-    1. Jouer avec les questions disponibles.
-    2. Compléter avec une autre difficulté.
-    3. Attendre la génération de nouvelles questions.
-    """
-
-    task_manager.start_user_request()
-
-    try:
-
-        if question_count not in {
-            5,
-            10,
-            15,
-            20
-        }:
-
-            raise ValueError(
-                "Le nombre de questions doit être 5, 10, 15 ou 20."
-            )
-
-        if difficulty not in {
-            "easy",
-            "medium",
-            "hard"
-        }:
-
-            raise ValueError(
-                "La difficulté doit être easy, medium ou hard."
-            )
-
-        max_capacity = get_max_capacity(
-            document
+    if not category_ids:
+        raise ValueError(
+            "Au moins une catégorie doit être sélectionnée."
         )
 
-        if max_capacity == 0:
+    available_count = count_questions(
+        difficulty=difficulty,
+        category_ids=category_ids,
+    )
 
-            raise ValueError(
-                "Aucun chunk disponible pour ce document."
-            )
-
-        available_count = count_available_questions(
-            document=document,
-            difficulty=difficulty,
-            user_id=user_id
-        )
-
-        if available_count >= question_count:
-
-            questions = get_random_questions(
-                document=document,
-                difficulty=difficulty,
-                question_count=question_count,
-                user_id=user_id
-            )
-
-            if len(questions) < question_count:
-
-                raise ValueError(
-                    "Les questions disponibles ont changé "
-                    "pendant la préparation du quiz."
-                )
-
-            return {
-                "status": "ready",
-                "questions": questions
-            }
-
-        missing_count = (
-            question_count
-            - available_count
-        )
-
-        mixed_options = get_mixed_difficulty_options(
-            document=document,
-            primary_difficulty=difficulty,
-            question_count=question_count,
-            user_id=user_id
-        )
-
-        generation_status = get_generation_status(
-            document=document,
-            difficulty=difficulty,
-            user_id=user_id,
-            requested_count=question_count
-        )
+    if available_count < question_count:
+        status = get_bank_status(category_ids=category_ids)
+        difficulty_status = status[difficulty]
 
         return {
             "status": "insufficient_questions",
-            "questions": [],
-            "document": document,
+            "category_ids": category_ids,
             "difficulty": difficulty,
             "requested_count": question_count,
             "available_count": available_count,
-            "missing_count": missing_count,
-            "generation": generation_status,
+            "missing_count": max(0, question_count - available_count),
+            "target_count": difficulty_status["target"],
+            "capacity": difficulty_status["capacity"],
+            "generation_active": difficulty_status["needs_generation"],
             "options": {
                 "available": {
                     "enabled": available_count > 0,
-                    "question_count": available_count
+                    "question_count": min(
+                        available_count,
+                        question_count,
+                    ),
                 },
                 "mixed": {
-                    "enabled": len(mixed_options) > 0,
-                    "difficulties": mixed_options
+                    "enabled": False,
+                    "difficulties": [],
                 },
                 "wait": {
                     "enabled": True,
-                    "missing_count": missing_count,
-                    "generation_active": generation_status[
-                        "generation_active"
-                    ]
-                }
-            }
+                    "missing_count": max(
+                        0,
+                        question_count - available_count,
+                    ),
+                    "generation_active": difficulty_status["needs_generation"],
+                },
+            },
         }
 
-    finally:
+    questions = get_random_questions(
+        difficulty=difficulty,
+        question_count=question_count,
+        user_id=user_id,
+        category_ids=category_ids,
+    )
 
-        task_manager.end_user_request()
+    if len(questions) < question_count:
+        raise ValueError(
+            "Pas assez de questions non vues disponibles pour cet utilisateur."
+        )
+
+    return {
+        "status": "ready",
+        "category_ids": category_ids,
+        "difficulty": difficulty,
+        "questions": questions,
+    }
+
+
+# ============================================================
+# QUIZ MIXTE
+# ============================================================
+
+def generate_mixed_quiz(
+    question_count: int,
+    primary_difficulty: str,
+    secondary_difficulty: str,
+    user_id: int,
+    category_ids: Optional[list[int]] = None,
+):
+    validate_question_count(question_count)
+    validate_difficulty(primary_difficulty)
+    validate_difficulty(secondary_difficulty)
+    category_ids = validate_category_ids(category_ids)
+
+    if not category_ids:
+        raise ValueError(
+            "Au moins une catégorie doit être sélectionnée."
+        )
+
+    if primary_difficulty == secondary_difficulty:
+        raise ValueError(
+            "Les deux difficultés doivent être différentes."
+        )
+
+    primary_count = (question_count + 1) // 2
+    secondary_count = question_count - primary_count
+
+    primary_available = count_questions(
+        difficulty=primary_difficulty,
+        category_ids=category_ids,
+    )
+
+    if primary_available < primary_count:
+        raise ValueError(
+            "Pas assez de questions disponibles pour la difficulté "
+            f"{primary_difficulty}. Disponibles : {primary_available}. "
+            f"Demandées : {primary_count}."
+        )
+
+    secondary_available = count_questions(
+        difficulty=secondary_difficulty,
+        category_ids=category_ids,
+    )
+
+    if secondary_available < secondary_count:
+        raise ValueError(
+            "Pas assez de questions disponibles pour la difficulté "
+            f"{secondary_difficulty}. Disponibles : {secondary_available}. "
+            f"Demandées : {secondary_count}."
+        )
+
+    primary_questions = get_random_questions(
+        difficulty=primary_difficulty,
+        question_count=primary_count,
+        user_id=user_id,
+        category_ids=category_ids,
+    )
+
+    secondary_questions = get_random_questions(
+        difficulty=secondary_difficulty,
+        question_count=secondary_count,
+        user_id=user_id,
+        category_ids=category_ids,
+    )
+
+    questions = primary_questions + secondary_questions
+
+    if len(questions) < question_count:
+        raise ValueError(
+            "Pas assez de questions non vues disponibles pour générer ce quiz."
+        )
+
+    return {
+        "status": "ready",
+        "category_ids": category_ids,
+        "questions": questions,
+    }
+
+
+# ============================================================
+# STATUT DE GÉNÉRATION POUR L'API
+# ============================================================
+
+def get_quiz_generation_status(
+    category_ids: Optional[list[int]] = None,
+):
+    category_ids = validate_category_ids(category_ids)
+
+    if not category_ids:
+        raise ValueError(
+            "Au moins une catégorie doit être sélectionnée."
+        )
+
+    status = get_bank_status(category_ids=category_ids)
+
+    return {
+        "category_ids": category_ids,
+        "target_per_category_difficulty": TARGET_QUESTION_COUNT,
+        "status": status,
+        "categories": get_category_bank_status(
+            category_ids=category_ids,
+        ),
+    }

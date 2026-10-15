@@ -720,6 +720,34 @@
 
 }
 
+.document-generate-button {
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  margin-top: 10px;
+  padding: 9px 13px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.document-generate-button:hover:not(:disabled) {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+
+.document-generate-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .document-delete-button {
 
   width: 40px;
@@ -819,7 +847,13 @@
   .document-item {
 
     padding: 12px;
+    align-items: flex-start;
 
+  }
+
+  .document-generate-button {
+    max-width: 100%;
+    text-align: left;
   }
 
   .document-item-info h3 {

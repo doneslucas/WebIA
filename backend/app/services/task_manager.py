@@ -2,227 +2,166 @@ from threading import Condition
 
 
 class TaskManager:
-    """
-    Gestionnaire central des priorités du site.
-
-    Priorités :
-    1. Chatbot et quiz utilisateur
-    2. Import / indexation des PDF
-    3. Génération automatique des banques de questions
-
-    Les tâches de priorité 2 et 3 sont coopératives :
-    elles peuvent attendre lorsqu'une tâche de priorité
-    supérieure est active.
-    """
+    """Synchronise les requêtes utilisateur, les opérations PDF et la génération."""
 
     def __init__(self):
         self._condition = Condition()
-
         self._active_user_requests = 0
         self._active_pdf_operations = 0
+        self._active_background_operations = 0
+        self._waiting_pdf_operations = 0
+        self._pdf_indexing_active = False
 
-    # ============================================================
-    # PRIORITÉ 1
-    # ============================================================
-
+    # Priorité 1 : requêtes interactives
     def start_user_request(self):
-        """
-        Signale le début d'une requête utilisateur prioritaire.
-
-        Les tâches de priorité 2 et 3 doivent attendre.
-        """
-
         with self._condition:
-
             self._active_user_requests += 1
-
             self._condition.notify_all()
-
-            print(
-                "[TaskManager] "
-                f"Priorité 1 démarrée. "
-                f"Requêtes utilisateur actives : "
-                f"{self._active_user_requests}"
-            )
 
     def end_user_request(self):
-        """
-        Signale la fin d'une requête utilisateur prioritaire.
-        """
-
         with self._condition:
-
             if self._active_user_requests > 0:
                 self._active_user_requests -= 1
-
             self._condition.notify_all()
 
-            print(
-                "[TaskManager] "
-                f"Priorité 1 terminée. "
-                f"Requêtes utilisateur actives : "
-                f"{self._active_user_requests}"
-            )
-
-    # ============================================================
-    # PRIORITÉ 2
-    # ============================================================
-
-    def start_pdf_operation(self):
-        """
-        Démarre une opération PDF de priorité 2.
-
-        Elle attend qu'aucune requête utilisateur de priorité 1
-        ne soit active.
-        """
-
+    # Priorité 2 : indexation exclusive
+    def start_pdf_indexing(self) -> bool:
+        """Réserve un créneau exclusif pour l'indexation d'un PDF."""
         with self._condition:
+            if self._pdf_indexing_active:
+                return False
 
-            while self._active_user_requests > 0:
+            # Réserve immédiatement le créneau pour refuser un second upload
+            # simultané, même si cette indexation doit attendre une autre tâche.
+            self._pdf_indexing_active = True
+            self._waiting_pdf_operations += 1
+            try:
+                while (
+                    self._active_user_requests > 0
+                    or self._active_pdf_operations > 0
+                    or self._active_background_operations > 0
+                ):
+                    self._condition.wait()
 
-                print(
-                    "[TaskManager] "
-                    "Import PDF en attente : "
-                    "une requête utilisateur prioritaire est active."
-                )
+                self._active_pdf_operations += 1
+                return True
+            except BaseException:
+                self._pdf_indexing_active = False
+                self._condition.notify_all()
+                raise
+            finally:
+                self._waiting_pdf_operations -= 1
+                self._condition.notify_all()
 
-                self._condition.wait()
-
-            self._active_pdf_operations += 1
-
+    def end_pdf_indexing(self):
+        with self._condition:
+            if self._pdf_indexing_active:
+                self._pdf_indexing_active = False
+                if self._active_pdf_operations > 0:
+                    self._active_pdf_operations -= 1
             self._condition.notify_all()
 
-            print(
-                "[TaskManager] "
-                f"Priorité 2 démarrée. "
-                f"Opérations PDF actives : "
-                f"{self._active_pdf_operations}"
-            )
+    # Priorité 2 : suppressions et opérations PDF non-indexation
+    def start_pdf_operation(self):
+        """Réserve une opération PDF exclusive, sans chevauchement avec génération."""
+        with self._condition:
+            self._waiting_pdf_operations += 1
+            try:
+                while (
+                    self._active_user_requests > 0
+                    or self._active_pdf_operations > 0
+                    or self._active_background_operations > 0
+                    or self._pdf_indexing_active
+                ):
+                    self._condition.wait()
+                self._active_pdf_operations += 1
+            finally:
+                self._waiting_pdf_operations -= 1
+                self._condition.notify_all()
 
     def end_pdf_operation(self):
-        """
-        Termine une opération PDF de priorité 2.
-        """
-
         with self._condition:
-
             if self._active_pdf_operations > 0:
                 self._active_pdf_operations -= 1
-
             self._condition.notify_all()
 
-            print(
-                "[TaskManager] "
-                f"Priorité 2 terminée. "
-                f"Opérations PDF actives : "
-                f"{self._active_pdf_operations}"
-            )
-
     def wait_for_pdf_permission(self):
-        """
-        Utilisé par une opération PDF de priorité 2.
-
-        L'indexation peut continuer uniquement lorsqu'aucune
-        requête utilisateur de priorité 1 n'est active.
-
-        Cette méthode permet donc à une requête utilisateur
-        d'interrompre coopérativement l'indexation entre
-        deux opérations coûteuses.
-        """
-
+        """Point de contrôle coopératif utilisé pendant l'indexation."""
         with self._condition:
-
             while self._active_user_requests > 0:
-
-                print(
-                    "[TaskManager] "
-                    "Indexation PDF en pause : "
-                    "priorité 1 active."
-                )
-
                 self._condition.wait()
 
-    # ============================================================
-    # PRIORITÉ 3
-    # ============================================================
+    # Priorité 3 : génération en arrière-plan
+    def start_background_operation(self):
+        """Démarre une tâche de fond uniquement si les priorités supérieures sont libres."""
+        with self._condition:
+            while (
+                self._active_user_requests > 0
+                or self._active_pdf_operations > 0
+                or self._waiting_pdf_operations > 0
+            ):
+                self._condition.wait()
+            self._active_background_operations += 1
+            self._condition.notify_all()
+
+    def end_background_operation(self):
+        with self._condition:
+            if self._active_background_operations > 0:
+                self._active_background_operations -= 1
+            self._condition.notify_all()
 
     def wait_for_background_permission(self):
-        """
-        Autorise une opération de priorité 3 uniquement lorsqu'il
-        n'y a ni requête utilisateur ni opération PDF active.
-
-        Cette méthode est utilisée entre deux opérations coûteuses.
-        """
-
+        """Point de contrôle coopératif pour laisser passer les requêtes et opérations PDF."""
         with self._condition:
+            while self._active_user_requests > 0:
+                self._condition.wait()
+
+            # À la frontière entre deux lots, libère temporairement le créneau
+            # de fond si une opération PDF attend. Cela évite à la fois les
+            # accès concurrents à PostgreSQL/Chroma et un blocage mutuel.
+            released_background_slot = False
+            if self._waiting_pdf_operations > 0 and self._active_background_operations > 0:
+                self._active_background_operations -= 1
+                released_background_slot = True
+                self._condition.notify_all()
 
             while (
                 self._active_user_requests > 0
                 or self._active_pdf_operations > 0
+                or self._waiting_pdf_operations > 0
             ):
-
-                if self._active_user_requests > 0:
-
-                    print(
-                        "[TaskManager] "
-                        "Génération automatique en pause : "
-                        "priorité 1 active."
-                    )
-
-                elif self._active_pdf_operations > 0:
-
-                    print(
-                        "[TaskManager] "
-                        "Génération automatique en pause : "
-                        "priorité 2 active."
-                    )
-
                 self._condition.wait()
 
-    # ============================================================
-    # INFORMATIONS
-    # ============================================================
+            if released_background_slot:
+                self._active_background_operations += 1
+                self._condition.notify_all()
 
+    # État
     def has_active_user_request(self):
-        """
-        Retourne True si une requête utilisateur est active.
-        """
-
         with self._condition:
-
-            return (
-                self._active_user_requests > 0
-            )
+            return self._active_user_requests > 0
 
     def has_active_pdf_operation(self):
-        """
-        Retourne True si une opération PDF est active.
-        """
-
         with self._condition:
+            return self._active_pdf_operations > 0
 
-            return (
-                self._active_pdf_operations > 0
-            )
+    def has_active_pdf_indexing(self):
+        with self._condition:
+            return self._pdf_indexing_active
 
     def get_status(self):
-        """
-        Retourne l'état actuel du gestionnaire.
-        """
-
         with self._condition:
-
             return {
-                "active_user_requests": (
-                    self._active_user_requests
-                ),
-                "active_pdf_operations": (
-                    self._active_pdf_operations
-                ),
+                "active_user_requests": self._active_user_requests,
+                "active_pdf_operations": self._active_pdf_operations,
+                "active_pdf_indexing": self._pdf_indexing_active,
+                "active_background_operations": self._active_background_operations,
+                "waiting_pdf_operations": self._waiting_pdf_operations,
                 "background_generation_paused": (
                     self._active_user_requests > 0
                     or self._active_pdf_operations > 0
-                )
+                    or self._waiting_pdf_operations > 0
+                ),
             }
 
 

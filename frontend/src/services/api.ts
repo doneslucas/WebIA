@@ -339,6 +339,25 @@ export async function deleteDocument(
 }
 
 
+export async function generateDocumentQuestions(
+  filename: string
+) {
+  const response = await authenticatedFetch(
+    `${API_URL}/documents/${encodeURIComponent(filename)}/generate-questions`,
+    {
+      method: "POST",
+    }
+  );
+
+  const data = await response.json();
+
+  return {
+    response,
+    data,
+  };
+}
+
+
 export async function getGenerationProgress(
   filename: string
 ) {
@@ -414,16 +433,36 @@ export async function changePassword(
 }
 
 
-/*
- * Génération classique d'un quiz.
- *
- * Le backend décide si :
- * - le quiz est immédiatement disponible ;
- * - il n'y a pas assez de questions ;
- * - plusieurs possibilités doivent être proposées.
- */
+// -------------------------------------------------
+// Catégories
+// -------------------------------------------------
+
+export async function getQuizCategories() {
+
+  const response =
+    await authenticatedFetch(
+      `${API_URL}/quiz/categories`,
+      {
+        method: "GET",
+      }
+    );
+
+  const data =
+    await response.json();
+
+  return {
+    response,
+    data,
+  };
+}
+
+
+// -------------------------------------------------
+// Quiz
+// -------------------------------------------------
+
 export async function generateQuiz(
-  document: string,
+  categoryIds: number[],
   questionCount: number,
   difficulty: string
 ) {
@@ -437,7 +476,8 @@ export async function generateQuiz(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          document,
+          category_ids:
+            categoryIds,
           question_count:
             questionCount,
           difficulty,
@@ -455,17 +495,8 @@ export async function generateQuiz(
 }
 
 
-/*
- * Génération d'un quiz en mélangeant
- * plusieurs difficultés.
- *
- * Exemple :
- * 8 questions faciles
- * + 12 questions intermédiaires
- * = 20 questions.
- */
 export async function generateMixedQuiz(
-  document: string,
+  categoryIds: number[],
   questionCount: number,
   primaryDifficulty: string,
   secondaryDifficulty: string
@@ -480,7 +511,8 @@ export async function generateMixedQuiz(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          document,
+          category_ids:
+            categoryIds,
           question_count:
             questionCount,
           primary_difficulty:
@@ -501,26 +533,35 @@ export async function generateMixedQuiz(
 }
 
 
-/*
- * Vérifie l'état de génération d'une banque
- * de questions pour un document et une difficulté.
- *
- * Cette fonction est utilisée lorsque
- * l'utilisateur choisit "Attendre".
- */
 export async function getQuizGenerationStatus(
-  document: string,
+  categoryIds: number[],
   questionCount: number,
   difficulty: string
 ) {
 
   const params =
-    new URLSearchParams({
-      document,
-      requested_count:
-        String(questionCount),
-      difficulty,
-    });
+    new URLSearchParams();
+
+  params.set(
+    "requested_count",
+    String(questionCount)
+  );
+
+  params.set(
+    "difficulty",
+    difficulty
+  );
+
+  categoryIds.forEach(
+    (categoryId) => {
+
+      params.append(
+        "category_ids",
+        String(categoryId)
+      );
+
+    }
+  );
 
   const response =
     await authenticatedFetch(

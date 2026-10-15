@@ -1,22 +1,20 @@
+"""Classification contrôlée des chunks WebIA dans la liste fixe de catégories."""
+
 import json
 import os
-from typing import Callable, Dict, List, Optional
+import re
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from langchain_ollama import OllamaLLM
-
-from app.services.categories import (
-    get_category_by_name,
-    get_category_names,
-)
 
 load_dotenv()
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "localhost")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_BASE_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
-
-CATEGORY_MODEL = "qwen2.5:7b"
+CATEGORY_MODEL = os.getenv("CATEGORY_MODEL", "qwen2.5:7b")
+DEFAULT_BATCH_SIZE = 5
 
 llm = OllamaLLM(
     model=CATEGORY_MODEL,
@@ -26,358 +24,346 @@ llm = OllamaLLM(
 )
 
 
-def _clean_json_response(response: str) -> Dict:
-    response = response.strip()
+def _extract_json(response: Any) -> dict:
+    """Parse la réponse JSON d'Ollama, même si elle contient des fences."""
+    if hasattr(response, "content"):
+        response = response.content
 
-    if response.startswith("```"):
-        lines = response.splitlines()
+    if isinstance(response, dict):
+        return response
 
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
+    if not isinstance(response, str):
+        raise ValueError("Réponse du modèle non textuelle.")
 
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-
-        response = "\n".join(lines).strip()
+    raw = response.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw)
 
     try:
-        return json.loads(response)
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
 
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Réponse JSON invalide du modèle : {response}"
-        ) from exc
-
-
-def _classify_chunk_group(
-    chunks: List[str],
-    category_names: List[str],
-) -> List[Dict[str, str]]:
-
-    if not chunks:
-        return []
-
-    group_text = "\n\n".join(chunks)
-
-    prompt = f"""
-Tu es un expert en cybersécurité chargé de classifier du contenu.
-
-Tu dois identifier les catégories de cybersécurité réellement représentées
-dans le texte fourni.
-
-IMPORTANT :
-- Tu dois UNIQUEMENT choisir parmi les catégories présentes dans la liste.
-- Tu ne dois JAMAIS créer de nouvelle catégorie.
-- Tu ne dois JAMAIS reformuler une catégorie.
-- Tu dois recopier exactement le nom des catégories.
-- Tu peux sélectionner plusieurs catégories.
-- Ne sélectionne une catégorie que si elle est réellement représentée
-  dans le texte.
-- Si plusieurs sujets sont présents, sélectionne toutes les catégories
-  pertinentes.
-- Si une catégorie générale et une catégorie plus précise existent,
-  privilégie la catégorie la plus précise.
-
-CATÉGORIES AUTORISÉES :
-
-{json.dumps(category_names, ensure_ascii=False, indent=2)}
-
-TEXTE À CLASSIFIER :
-
-{group_text}
-
-Réponds UNIQUEMENT avec ce JSON :
-
-{{
-    "categories": [
-        "Nom exact de la catégorie"
-    ]
-}}
-"""
-
-    response = llm.invoke(prompt)
-
-    print(
-        "[CategoryClassifier] "
-        "Réponse brute du groupe :"
-    )
-
-    print(response)
-
-    data = _clean_json_response(response)
-
-    selected_categories = data.get(
-        "categories",
-        []
-    )
-
-    if not isinstance(
-        selected_categories,
-        list
-    ):
-        print(
-            "[CategoryClassifier] "
-            "Réponse invalide : "
-            "la propriété 'categories' "
-            "n'est pas une liste."
-        )
-
-        return []
-
-    validated_categories = []
-
-    for category_name in selected_categories:
-
-        if not isinstance(
-            category_name,
-            str
-        ):
-            continue
-
-        category = get_category_by_name(
-            category_name
-        )
-
-        if category is None:
-
-            print(
-                "[CategoryClassifier] "
-                "Catégorie ignorée car inconnue : "
-                f"{category_name}"
+        if start < 0 or end <= start:
+            raise ValueError(
+                "La réponse du modèle ne contient pas de JSON valide."
             )
 
+        parsed = json.loads(raw[start:end + 1])
+
+    if not isinstance(parsed, dict):
+        raise ValueError("Le JSON de classification doit être un objet.")
+
+    return parsed
+
+
+def _allowed_category_map(
+    allowed_categories: list[dict],
+) -> tuple[dict[int, dict], dict[str, dict]]:
+    by_id: dict[int, dict] = {}
+    by_name: dict[str, dict] = {}
+
+    for category in allowed_categories:
+        if not isinstance(category, dict):
             continue
 
-        validated_categories.append(
-            category
-        )
+        category_id = category.get("id")
+        name = category.get("name")
 
-    return validated_categories
-
-
-def detect_document_categories(
-    chunks: List[str],
-    progress_callback: Optional[
-        Callable[[int, int], None]
-    ] = None,
-) -> List[Dict[str, str]]:
-
-    if not chunks:
-        return []
-
-    category_names = get_category_names()
-
-    GROUP_SIZE = 10
-
-    print(
-        f"[CategoryClassifier] "
-        f"Nombre total de chunks : {len(chunks)}"
-    )
-
-    print(
-        f"[CategoryClassifier] "
-        f"Taille moyenne approximative des chunks : "
-        f"{sum(len(chunk) for chunk in chunks) // len(chunks)} "
-        f"caractères"
-    )
-
-    all_categories = {}
-
-    total_groups = (
-        len(chunks) + GROUP_SIZE - 1
-    ) // GROUP_SIZE
-
-    for group_index in range(
-        total_groups
-    ):
-
-        start = (
-            group_index * GROUP_SIZE
-        )
-
-        end = min(
-            start + GROUP_SIZE,
-            len(chunks)
-        )
-
-        group_chunks = chunks[
-            start:end
-        ]
-
-        print(
-            f"[CategoryClassifier] "
-            f"Analyse du groupe "
-            f"{group_index + 1}/{total_groups} "
-            f"({len(group_chunks)} chunks)..."
-        )
+        if category_id is None or not isinstance(name, str) or not name.strip():
+            continue
 
         try:
-
-            group_categories = (
-                _classify_chunk_group(
-                    group_chunks,
-                    category_names
-                )
-            )
-
-        except Exception as exc:
-
-            print(
-                f"[CategoryClassifier] "
-                f"Erreur lors de l'analyse du groupe "
-                f"{group_index + 1} : {exc}"
-            )
-
+            numeric_id = int(category_id)
+        except (TypeError, ValueError):
             continue
 
-        for category in group_categories:
+        by_id[numeric_id] = category
+        by_name[name.strip().casefold()] = category
 
-            all_categories[
-                category["id"]
-            ] = category
-
-        print(
-            f"[CategoryClassifier] "
-            f"Groupe {group_index + 1} : "
-            f"{len(group_categories)} "
-            f"catégorie(s) valide(s)"
+    if not by_id:
+        raise ValueError(
+            "La liste des catégories autorisées est vide ou invalide."
         )
 
-        # ----------------------------------------------------
-        # PROGRESSION DE LA DÉTECTION DES CATÉGORIES
-        #
-        # Cette étape occupe la plage 22 -> 24 %.
-        # ----------------------------------------------------
+    return by_id, by_name
 
-        if progress_callback is not None:
 
-            progress_callback(
-                group_index + 1,
-                total_groups
-            )
+def _resolve_category(
+    value: Any,
+    by_id: dict[int, dict],
+    by_name: dict[str, dict],
+) -> Optional[dict]:
+    if value is None or value == "null":
+        return None
 
-    detected_categories = list(
-        all_categories.values()
-    )
-
-    print(
-        f"[CategoryClassifier] "
-        f"Nombre total de catégories détectées : "
-        f"{len(detected_categories)}"
-    )
-
-    for category in detected_categories:
-
-        print(
-            f"  - {category['id']} : "
-            f"{category['name']} "
-            f"({category['family']})"
+    if isinstance(value, dict):
+        value = value.get(
+            "category_id",
+            value.get("id", value.get("category")),
         )
 
-    return detected_categories
+    try:
+        candidate_id = int(value)
+
+        if candidate_id in by_id:
+            return by_id[candidate_id]
+
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, str):
+        return by_name.get(value.strip().casefold())
+
+    return None
 
 
 def classify_chunk(
     chunk_text: str,
-    allowed_categories: List[Dict[str, str]],
-) -> Dict[str, str]:
+    allowed_categories: list[dict],
+    require_category: bool = False,
+) -> Optional[dict]:
+    """Attribue une catégorie existante à un chunk.
 
-    if not chunk_text.strip():
+    require_category=True est réservé à la réparation de chunks provenant
+    de documents déjà reconnus comme documents de cybersécurité.
+    """
+    if not isinstance(chunk_text, str) or not chunk_text.strip():
+        return None
 
-        raise ValueError(
-            "Le chunk est vide."
+    by_id, by_name = _allowed_category_map(allowed_categories)
+
+    category_lines = [
+        (
+            f'{category_id}: {category.get("name", "")} '
+            f'(famille: {category.get("family", "")})'
         )
-
-    if not allowed_categories:
-
-        raise ValueError(
-            "Aucune catégorie autorisée "
-            "n'a été fournie."
-        )
-
-    allowed_names = [
-        category["name"]
-        for category in allowed_categories
+        for category_id, category in sorted(by_id.items())
     ]
 
-    prompt = f"""
-Tu es un expert en cybersécurité.
+    if require_category:
+        null_rule = (
+            "Pour un texte non vide contenant une information exploitable, "
+            "choisis obligatoirement la catégorie autorisée la plus proche. "
+            "N'utilise null que si le texte est vide, illisible "
+            "ou sans information exploitable."
+        )
+    else:
+        null_rule = (
+            "Utilise null uniquement si le chunk est vide, illisible, "
+            "trop court pour être interprété ou sans lien utile "
+            "avec la cybersécurité."
+        )
 
-Tu dois attribuer UNE SEULE catégorie principale
-au texte fourni.
+    prompt = f"""Tu classes un extrait documentaire pour une application
+de formation en cybersécurité.
 
-IMPORTANT :
-- Tu dois choisir UNIQUEMENT parmi les catégories autorisées.
-- Tu ne dois JAMAIS créer une nouvelle catégorie.
-- Tu ne dois JAMAIS reformuler le nom d'une catégorie.
-- Tu dois retourner exactement le nom d'une catégorie de la liste.
-- Choisis la catégorie qui représente le mieux le sujet principal du texte.
-- Si une catégorie très précise correspond au contenu,
-  préfère-la à une catégorie plus générale.
+Tu dois utiliser exclusivement cette liste fermée de catégories :
+{chr(10).join(category_lines)}
 
-CATÉGORIES AUTORISÉES :
+Règles :
+- Ne crée, ne renomme et ne modifie aucune catégorie.
+- Choisis une seule catégorie dont le sujet correspond le mieux au texte.
+- {null_rule}
+- Retourne uniquement un objet JSON sous la forme
+  {{"category_id": 12}} ou {{"category_id": null}}.
 
-{json.dumps(
-    allowed_names,
-    ensure_ascii=False,
-    indent=2
-)}
-
-TEXTE DU CHUNK :
-
-{chunk_text}
-
-Réponds UNIQUEMENT avec ce JSON :
-
-{{
-    "category": "Nom exact de la catégorie"
-}}
+Texte du chunk :
+<chunk>
+{chunk_text[:9000]}
+</chunk>
 """
 
-    response = llm.invoke(prompt)
-
-    print(
-        "[CategoryClassifier] "
-        "Réponse brute de Qwen pour le chunk:"
+    parsed = _extract_json(llm.invoke(prompt))
+    value = parsed.get(
+        "category_id",
+        parsed.get("category", parsed.get("id")),
     )
 
-    print(response)
+    category = _resolve_category(value, by_id, by_name)
 
-    data = _clean_json_response(
-        response
-    )
-
-    category_name = data.get(
-        "category"
-    )
-
-    if not isinstance(
-        category_name,
-        str
-    ):
-
+    if category is None and require_category:
         raise ValueError(
-            "Le modèle n'a pas retourné "
-            "de catégorie valide."
-        )
-
-    category = get_category_by_name(
-        category_name
-    )
-
-    if category is None:
-
-        raise ValueError(
-            "Catégorie inconnue retournée "
-            f"par le modèle : {category_name}"
-        )
-
-    if category_name not in allowed_names:
-
-        raise ValueError(
-            f"La catégorie '{category_name}' "
-            "ne fait pas partie des catégories "
-            "autorisées pour ce document."
+            "Le modèle n'a pas retourné d'identifiant de catégorie autorisé."
         )
 
     return category
+
+
+def classify_chunks_batch(
+    chunk_texts: list[str],
+    allowed_categories: list[dict],
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    require_category: bool = False,
+) -> list[Optional[dict]]:
+    """Classe des chunks par petits lots, en conservant leur ordre d'entrée.
+
+    Si un lot est invalide, la fonction réessaie les chunks individuellement.
+    Une erreur concernant un chunk n'arrête pas les autres.
+    """
+    if batch_size < 1 or batch_size > 10:
+        raise ValueError("batch_size doit être compris entre 1 et 10.")
+
+    by_id, by_name = _allowed_category_map(allowed_categories)
+    output: list[Optional[dict]] = [None] * len(chunk_texts)
+
+    category_lines = [
+        (
+            f'{category_id}: {category.get("name", "")} '
+            f'(famille: {category.get("family", "")})'
+        )
+        for category_id, category in sorted(by_id.items())
+    ]
+
+    for offset in range(0, len(chunk_texts), batch_size):
+        batch = chunk_texts[offset:offset + batch_size]
+
+        usable_indices = [
+            index
+            for index, chunk in enumerate(batch)
+            if isinstance(chunk, str) and chunk.strip()
+        ]
+
+        if not usable_indices:
+            continue
+
+        chunk_sections = []
+
+        for index in usable_indices:
+            safe_text = batch[index][:7000]
+            chunk_sections.append(
+                f"CHUNK_INDEX={index}\n"
+                f"<chunk>\n{safe_text}\n</chunk>"
+            )
+
+        if require_category:
+            null_rule = (
+                "Pour tout texte non vide exploitable, sélectionne "
+                "obligatoirement la catégorie autorisée la plus proche. "
+                "Utilise null uniquement si le texte est inutilisable."
+            )
+        else:
+            null_rule = (
+                "Retourne null seulement si le texte est vide, illisible "
+                "ou sans information exploitable liée à la cybersécurité."
+            )
+
+        prompt = f"""Tu classes plusieurs extraits de documents dans une
+liste fermée de catégories de cybersécurité.
+
+Catégories autorisées :
+{chr(10).join(category_lines)}
+
+Consignes :
+- Aucun nouvel identifiant ni aucune catégorie inventée.
+- Chaque chunk reçoit une seule catégorie existante ou null.
+- {null_rule}
+- Chaque index du lot doit apparaître exactement une fois.
+- Réponds uniquement en JSON sous la forme :
+  {{"classifications":[{{"index":0,"category_id":12}},
+                       {{"index":1,"category_id":null}}]}}.
+
+Extraits :
+{chr(10).join(chunk_sections)}
+"""
+
+        try:
+            parsed = _extract_json(llm.invoke(prompt))
+            entries = parsed.get("classifications")
+
+            if not isinstance(entries, list):
+                raise ValueError(
+                    "Le tableau 'classifications' est absent."
+                )
+
+            mapped: dict[int, Any] = {}
+
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+
+                try:
+                    index = int(entry.get("index"))
+                except (TypeError, ValueError):
+                    continue
+
+                if index in usable_indices:
+                    mapped[index] = entry.get(
+                        "category_id",
+                        entry.get("category", entry.get("id")),
+                    )
+
+            for local_index in usable_indices:
+                global_index = offset + local_index
+
+                if local_index not in mapped:
+                    output[global_index] = classify_chunk(
+                        batch[local_index],
+                        allowed_categories,
+                        require_category=require_category,
+                    )
+                    continue
+
+                category = _resolve_category(
+                    mapped[local_index],
+                    by_id,
+                    by_name,
+                )
+
+                if category is None and require_category:
+                    output[global_index] = classify_chunk(
+                        batch[local_index],
+                        allowed_categories,
+                        require_category=True,
+                    )
+                else:
+                    output[global_index] = category
+
+        except Exception as batch_error:
+            print(
+                f"[Classifier] Lot {offset + 1}-{offset + len(batch)} "
+                f"invalide ({batch_error}); reprise chunk par chunk."
+            )
+
+            for local_index in usable_indices:
+                global_index = offset + local_index
+
+                try:
+                    output[global_index] = classify_chunk(
+                        batch[local_index],
+                        allowed_categories,
+                        require_category=require_category,
+                    )
+                except Exception as error:
+                    print(
+                        f"[Classifier] Chunk {global_index + 1} "
+                        f"non classé : {error}"
+                    )
+                    output[global_index] = None
+
+    return output
+
+
+def detect_document_categories(
+    chunks: list[str],
+    allowed_categories: list[dict],
+) -> list[dict]:
+    """Compatibilité : renvoie les catégories distinctes d'un document."""
+    classified = classify_chunks_batch(
+        chunks,
+        allowed_categories,
+        batch_size=DEFAULT_BATCH_SIZE,
+    )
+
+    ids = {
+        category["id"]
+        for category in classified
+        if category is not None
+    }
+
+    return [
+        category
+        for category in allowed_categories
+        if category.get("id") in ids
+    ]

@@ -1,0 +1,60 @@
+INSERT INTO categories (id, name, family) VALUES
+(1, 'Fondamentaux de la cybersécurité', 'Fondamentaux'),
+(2, 'Architecture et conception sécurisées', 'Fondamentaux'),
+(3, 'Sensibilisation et formation à la cybersécurité', 'Fondamentaux'),
+(4, 'Sécurité physique', 'Fondamentaux'),
+(5, 'Gestion des risques', 'Fondamentaux'),
+
+(6, 'Réseaux et protocoles', 'Réseaux'),
+(7, 'Sécurité réseau', 'Réseaux'),
+(8, 'Sécurité Wi-Fi et réseaux sans fil', 'Réseaux'),
+(9, 'Sécurité des emails', 'Réseaux'),
+(10, 'API et services', 'Réseaux'),
+
+(11, 'Sécurité des systèmes', 'Systèmes & infrastructures'),
+(12, 'Sécurité Windows', 'Systèmes & infrastructures'),
+(13, 'Sécurité Linux', 'Systèmes & infrastructures'),
+(14, 'Active Directory et environnements Microsoft', 'Systèmes & infrastructures'),
+(15, 'Sécurité des environnements virtualisés', 'Systèmes & infrastructures'),
+(16, 'Conteneurs et Kubernetes', 'Systèmes & infrastructures'),
+(17, 'Sécurité matérielle et firmware', 'Systèmes & infrastructures'),
+
+(18, 'Sécurité Web et applications', 'Applications & développement'),
+(19, 'DevSecOps et sécurité du développement', 'Applications & développement'),
+(20, 'Vulnérabilités et gestion des correctifs', 'Applications & développement'),
+(21, 'Sécurité de la chaîne d''approvisionnement', 'Applications & développement'),
+(22, 'Reverse engineering', 'Applications & développement'),
+
+(23, 'Authentification et contrôle d''accès', 'Identité & données'),
+(24, 'Identité et gestion des accès (IAM)', 'Identité & données'),
+(25, 'Cryptographie', 'Identité & données'),
+(26, 'Sécurité des mots de passe et secrets', 'Identité & données'),
+(27, 'Sécurité des bases de données', 'Identité & données'),
+(28, 'Protection des données et vie privée', 'Identité & données'),
+
+(29, 'Sécurité du cloud', 'Technologies spécialisées'),
+(30, 'Sécurité mobile', 'Technologies spécialisées'),
+(31, 'IoT et systèmes embarqués', 'Technologies spécialisées'),
+(32, 'Sécurité industrielle / OT / SCADA', 'Technologies spécialisées'),
+(33, 'Sécurité des systèmes embarqués et automobiles', 'Technologies spécialisées'),
+
+(34, 'Malwares et logiciels malveillants', 'Menaces & attaques'),
+(35, 'Phishing et ingénierie sociale', 'Menaces & attaques'),
+(36, 'OSINT et reconnaissance', 'Menaces & attaques'),
+(37, 'Exploitation et post-exploitation', 'Menaces & attaques'),
+(38, 'MITRE ATT&CK et techniques d''attaque', 'Menaces & attaques'),
+
+(39, 'Tests d''intrusion et Red Team', 'Sécurité offensive'),
+(40, 'Sécurité offensive', 'Sécurité offensive'),
+(41, 'CTF et exercices de cybersécurité', 'Sécurité offensive'),
+
+(42, 'Détection, surveillance et SOC', 'Sécurité défensive'),
+(43, 'SIEM et analyse des logs', 'Sécurité défensive'),
+(44, 'Threat Intelligence', 'Sécurité défensive'),
+(45, 'Réponse aux incidents', 'Sécurité défensive'),
+(46, 'Forensics et analyse numérique', 'Sécurité défensive'),
+(47, 'Sécurité défensive', 'Sécurité défensive'),
+
+(48, 'Gouvernance et politiques de sécurité', 'Organisation & continuité'),
+(49, 'Normes, conformité et réglementation', 'Organisation & continuité'),
+(50, 'Continuité d''activité et reprise après sinistre', 'Organisation & continuité');

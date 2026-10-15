@@ -11,6 +11,7 @@ from app.routes.progress import router as progress_router
 from app.routes.quiz import router as quiz_router
 
 from app.services.question_bank_manager import question_bank_manager
+from app.services.task_manager import task_manager
 
 
 @asynccontextmanager
@@ -36,6 +37,25 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+@app.middleware("http")
+async def prioritize_interactive_requests(request, call_next):
+    """Les requêtes chatbot et quiz sont prioritaires sur les tâches de fond."""
+    path = request.url.path
+    is_priority_request = (
+        path == "/chat"
+        or path.startswith("/chat/")
+        or path == "/quiz"
+        or path.startswith("/quiz/")
+    )
+    if is_priority_request:
+        task_manager.start_user_request()
+    try:
+        return await call_next(request)
+    finally:
+        if is_priority_request:
+            task_manager.end_user_request()
 
 
 app.add_middleware(

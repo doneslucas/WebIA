@@ -30,11 +30,14 @@ export type QuizGenerationOption = {
 
 
 export type QuizGenerationData = {
-  document: string;
+  category_ids: number[];
   difficulty: string;
   requested_count: number;
   available_count: number;
   missing_count: number;
+  target_count: number;
+  capacity: number;
+  generation_active: boolean;
 
   options: {
     available: {
@@ -53,24 +56,11 @@ export type QuizGenerationData = {
       generation_active: boolean;
     };
   };
-
-  generation: {
-    document: string;
-    difficulty: string;
-    requested_count: number;
-    total_count: number;
-    available_count: number;
-    missing_count: number;
-    target_count: number;
-    capacity: number;
-    generation_active: boolean;
-    ready: boolean;
-  };
 };
 
 
 type QuizContextType = {
-  document: string;
+  categoryIds: number[];
   questionCount: string;
   difficulty: string;
 
@@ -96,7 +86,7 @@ type QuizContextType = {
 
   waitingForGeneration: boolean;
 
-  setDocument: (value: string) => void;
+  setCategoryIds: (value: number[]) => void;
   setQuestionCount: (value: string) => void;
   setDifficulty: (value: string) => void;
 
@@ -137,8 +127,8 @@ export function QuizProvider({
   children,
 }: QuizProviderProps) {
 
-  const [document, setDocument] =
-    useState("all");
+  const [categoryIds, setCategoryIds] =
+    useState<number[]>([]);
 
   const [questionCount, setQuestionCount] =
     useState("10");
@@ -181,10 +171,12 @@ export function QuizProvider({
     setCurrentAnswerCorrect
   ] = useState<boolean | null>(null);
 
+
   const [
     currentCorrectAnswer,
     setCurrentCorrectAnswer
   ] = useState<number | null>(null);
+
 
   const [
     currentExplanation,
@@ -246,17 +238,27 @@ export function QuizProvider({
 
   async function startQuiz() {
 
+    if (categoryIds.length === 0) {
+
+      setMessage(
+        "Veuillez sélectionner au moins une catégorie."
+      );
+
+      return;
+    }
+
     setMessage("");
     setLoading(true);
     setGenerationChoice(null);
 
     try {
 
-      const result = await generateQuiz(
-        document,
-        Number(questionCount),
-        difficulty
-      );
+      const result =
+        await generateQuiz(
+          categoryIds,
+          Number(questionCount),
+          difficulty
+        );
 
 
       if (!result.response.ok) {
@@ -362,6 +364,15 @@ export function QuizProvider({
       return;
     }
 
+    if (categoryIds.length === 0) {
+
+      setMessage(
+        "Veuillez sélectionner au moins une catégorie."
+      );
+
+      return;
+    }
+
     setLoading(true);
     setMessage("");
 
@@ -370,9 +381,16 @@ export function QuizProvider({
       const availableCount =
         generationChoice.available_count;
 
+      if (availableCount <= 0) {
+
+        throw new Error(
+          "Aucune question n'est actuellement disponible."
+        );
+      }
+
       const result =
         await generateQuiz(
-          document,
+          categoryIds,
           Math.min(
             availableCount,
             Number(questionCount)
@@ -448,6 +466,15 @@ export function QuizProvider({
       return;
     }
 
+    if (categoryIds.length === 0) {
+
+      setMessage(
+        "Veuillez sélectionner au moins une catégorie."
+      );
+
+      return;
+    }
+
     setLoading(true);
     setMessage("");
 
@@ -455,7 +482,7 @@ export function QuizProvider({
 
       const result =
         await generateMixedQuiz(
-          document,
+          categoryIds,
           Number(questionCount),
           difficulty,
           fallbackDifficulty
@@ -538,6 +565,15 @@ export function QuizProvider({
       return;
     }
 
+    if (categoryIds.length === 0) {
+
+      setMessage(
+        "Veuillez sélectionner au moins une catégorie."
+      );
+
+      return;
+    }
+
     setWaitingForGeneration(true);
     setLoading(true);
     setMessage(
@@ -559,7 +595,7 @@ export function QuizProvider({
 
         const result =
           await getQuizGenerationStatus(
-            document,
+            categoryIds,
             Number(questionCount),
             difficulty
           );
@@ -577,15 +613,19 @@ export function QuizProvider({
         const status =
           result.data;
 
+        const difficultyStatus =
+          status.status?.[difficulty];
+
 
         if (
-          status.available_count >=
+          difficultyStatus &&
+          difficultyStatus.current >=
           Number(questionCount)
         ) {
 
           const quizResult =
             await generateQuiz(
-              document,
+              categoryIds,
               Number(questionCount),
               difficulty
             );
@@ -606,9 +646,13 @@ export function QuizProvider({
         }
 
 
+        const availableCount =
+          difficultyStatus?.current ?? 0;
+
+
         setMessage(
           `Génération en cours : ${
-            status.available_count
+            availableCount
           } / ${
             Number(questionCount)
           } questions disponibles.`
@@ -733,7 +777,6 @@ export function QuizProvider({
 
 
     setLoading(true);
-
     setMessage("");
 
 
@@ -808,7 +851,6 @@ export function QuizProvider({
     ) {
 
       setLoading(true);
-
       setMessage("");
 
       try {
@@ -959,7 +1001,7 @@ export function QuizProvider({
   return (
     <QuizContext.Provider
       value={{
-        document,
+        categoryIds,
         questionCount,
         difficulty,
 
@@ -983,7 +1025,7 @@ export function QuizProvider({
         generationChoice,
         waitingForGeneration,
 
-        setDocument,
+        setCategoryIds,
         setQuestionCount,
         setDifficulty,
 

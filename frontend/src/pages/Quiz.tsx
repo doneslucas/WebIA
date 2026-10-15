@@ -2,6 +2,7 @@ import "./Quiz.css";
 
 import {
   useEffect,
+  useMemo,
   useState,
 } from "react";
 
@@ -11,21 +12,29 @@ import {
 } from "../contexts/QuizContext";
 
 import {
-  getDocuments,
+  getQuizCategories,
 } from "../services/api";
 
 
-type DocumentItem = {
+type CategoryQuestionCounts = {
+  easy: number;
+  medium: number;
+  hard: number;
+};
+
+
+type CategoryItem = {
   id: number;
-  file: string;
-  chunks: number;
+  name: string;
+  family: string;
+  question_counts: CategoryQuestionCounts;
 };
 
 
 function Quiz() {
 
   const {
-    document,
+    categoryIds,
     questionCount,
     difficulty,
 
@@ -49,7 +58,7 @@ function Quiz() {
     generationChoice,
     waitingForGeneration,
 
-    setDocument,
+    setCategoryIds,
     setQuestionCount,
     setDifficulty,
 
@@ -67,72 +76,106 @@ function Quiz() {
     returnToQuizHome,
 
     score,
+
   } = useQuiz();
 
 
   const [
-    documents,
-    setDocuments
-  ] = useState<DocumentItem[]>([]);
+    categories,
+    setCategories
+  ] = useState<CategoryItem[]>([]);
+
 
   const [
-    documentsLoading,
-    setDocumentsLoading
+    categoriesLoading,
+    setCategoriesLoading
   ] = useState(true);
 
+
   const [
-    documentsError,
-    setDocumentsError
+    categoriesError,
+    setCategoriesError
   ] = useState("");
+
+
+  const [
+    openFamilies,
+    setOpenFamilies
+  ] = useState<Set<string>>(
+    new Set()
+  );
 
 
   useEffect(() => {
 
-    async function loadDocuments() {
+    async function loadCategories() {
 
-      setDocumentsLoading(true);
-      setDocumentsError("");
+      setCategoriesLoading(true);
+      setCategoriesError("");
 
       try {
 
         const result =
-          await getDocuments();
+          await getQuizCategories();
 
         if (!result.response.ok) {
 
           throw new Error(
             result.data.detail ||
-            "Impossible de récupérer les documents."
+            "Impossible de récupérer les catégories."
           );
         }
 
         if (
-          !result.data.documents ||
+          !result.data.categories ||
           !Array.isArray(
-            result.data.documents
+            result.data.categories
           )
         ) {
 
           throw new Error(
-            "Le serveur n'a pas retourné une liste de documents valide."
+            "Le serveur n'a pas retourné une liste de catégories valide."
           );
         }
 
-        const validDocuments =
-          result.data.documents.filter(
-            (item: DocumentItem) =>
+        const validCategories: CategoryItem[] =
+          result.data.categories.filter(
+            (item: CategoryItem) =>
               typeof item.id === "number" &&
-              typeof item.file === "string"
+              typeof item.name === "string" &&
+              typeof item.family === "string" &&
+              item.question_counts &&
+              typeof item.question_counts.easy === "number" &&
+              typeof item.question_counts.medium === "number" &&
+              typeof item.question_counts.hard === "number"
           );
 
-        setDocuments(
-          validDocuments
+        if (
+          validCategories.length === 0
+        ) {
+
+          throw new Error(
+            "Aucune catégorie valide n'a été retournée."
+          );
+        }
+
+        setCategories(
+          validCategories
+        );
+
+        setOpenFamilies(
+          new Set(
+            validCategories.map(
+              (category) =>
+                category.family
+            )
+          )
         );
 
       } catch (error) {
 
         console.error(
-          "Erreur lors du chargement des documents :",
+          "Erreur lors du chargement des catégories :",
           error
         );
 
@@ -140,26 +183,163 @@ function Quiz() {
           error instanceof Error
         ) {
 
-          setDocumentsError(
+          setCategoriesError(
             error.message
           );
 
         } else {
 
-          setDocumentsError(
-            "Impossible de charger les documents."
+          setCategoriesError(
+            "Impossible de charger les catégories."
           );
         }
 
       } finally {
 
-        setDocumentsLoading(false);
+        setCategoriesLoading(false);
       }
     }
 
-    loadDocuments();
+
+    loadCategories();
 
   }, []);
+
+
+  const categoriesByFamily =
+    useMemo(() => {
+
+      const grouped =
+        new Map<string, CategoryItem[]>();
+
+      categories.forEach(
+        (category) => {
+
+          const existing =
+            grouped.get(
+              category.family
+            ) || [];
+
+          existing.push(
+            category
+          );
+
+          grouped.set(
+            category.family,
+            existing
+          );
+        }
+      );
+
+      return Array.from(
+        grouped.entries()
+      );
+
+    }, [categories]);
+
+
+  function toggleCategory(
+    categoryId: number
+  ) {
+
+    setCategoryIds(
+      categoryIds.includes(categoryId)
+        ? categoryIds.filter(
+            (id) =>
+              id !== categoryId
+          )
+        : [
+            ...categoryIds,
+            categoryId
+          ]
+    );
+  }
+
+
+  function selectAllCategories() {
+
+    setCategoryIds(
+      categories.map(
+        (category) =>
+          category.id
+      )
+    );
+  }
+
+
+  function clearCategories() {
+
+    setCategoryIds([]);
+  }
+
+
+  function toggleFamily(
+    family: string
+  ) {
+
+    setOpenFamilies(
+      (previous) => {
+
+        const next =
+          new Set(previous);
+
+        if (
+          next.has(family)
+        ) {
+
+          next.delete(family);
+
+        } else {
+
+          next.add(family);
+        }
+
+        return next;
+      }
+    );
+  }
+
+
+  function selectFamily(
+    familyCategories: CategoryItem[]
+  ) {
+
+    const familyIds =
+      familyCategories.map(
+        (category) =>
+          category.id
+      );
+
+    setCategoryIds(
+      Array.from(
+        new Set([
+          ...categoryIds,
+          ...familyIds
+        ])
+      )
+    );
+  }
+
+
+  function clearFamily(
+    familyCategories: CategoryItem[]
+  ) {
+
+    const familyIds =
+      new Set(
+        familyCategories.map(
+          (category) =>
+            category.id
+        )
+      );
+
+    setCategoryIds(
+      categoryIds.filter(
+        (id) =>
+          !familyIds.has(id)
+      )
+    );
+  }
 
 
   function getResultInfo(
@@ -262,93 +442,11 @@ function Quiz() {
 
             <p>
               Testez vos connaissances en
-              cybersécurité grâce aux documents
-              disponibles.
+              cybersécurité grâce aux questions
+              disponibles dans la banque.
             </p>
 
           </header>
-
-
-          <section className="quiz-modes">
-
-            <div className="quiz-mode-card active">
-
-              <div className="quiz-mode-icon">
-                📝
-              </div>
-
-              <div>
-
-                <h2>
-                  Quiz QCM
-                </h2>
-
-                <p>
-                  Répondez à une série de questions
-                  générées à partir des documents.
-                </p>
-
-                <span className="quiz-mode-status">
-                  V1 — Disponible
-                </span>
-
-              </div>
-
-            </div>
-
-
-            <div className="quiz-mode-card disabled">
-
-              <div className="quiz-mode-icon">
-                🎯
-              </div>
-
-              <div>
-
-                <h2>
-                  Exercices pratiques
-                </h2>
-
-                <p>
-                  Analysez des situations concrètes
-                  de cybersécurité.
-                </p>
-
-                <span className="quiz-mode-status">
-                  V2 — À venir
-                </span>
-
-              </div>
-
-            </div>
-
-
-            <div className="quiz-mode-card disabled">
-
-              <div className="quiz-mode-icon">
-                🧠
-              </div>
-
-              <div>
-
-                <h2>
-                  Quiz adaptatif
-                </h2>
-
-                <p>
-                  La difficulté évoluera selon
-                  vos résultats.
-                </p>
-
-                <span className="quiz-mode-status">
-                  V3 — À venir
-                </span>
-
-              </div>
-
-            </div>
-
-          </section>
 
 
           <section className="quiz-configuration">
@@ -360,156 +458,656 @@ function Quiz() {
               </h2>
 
               <p>
-                Choisissez les paramètres de votre
-                quiz.
+                Choisissez les thèmes et les
+                paramètres de votre quiz.
               </p>
 
             </div>
 
 
-            <div className="quiz-form">
+            <div className="quiz-field">
 
-              <div className="quiz-field">
+              <label>
+                Catégories
+              </label>
 
-                <label htmlFor="document">
-                  Document
-                </label>
 
-                <select
-                  id="document"
-                  value={document}
-                  onChange={(event) =>
-                    setDocument(
-                      event.target.value
-                    )
-                  }
-                  disabled={
-                    loading ||
-                    documentsLoading
-                  }
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: "12px",
+                  flexWrap: "wrap",
+                  marginBottom: "15px",
+                }}
+              >
+
+                <div>
+
+                  <strong>
+                    {categoryIds.length}
+                  </strong>{" "}
+                  / {categories.length} catégorie
+                  {categories.length !== 1
+                    ? "s"
+                    : ""}{" "}
+                  sélectionnée
+                  {categoryIds.length !== 1
+                    ? "s"
+                    : ""}
+
+                </div>
+
+
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "8px",
+                    flexWrap: "wrap",
+                  }}
                 >
 
-                  <option value="all">
-                    Tous les documents
-                  </option>
+                  <button
+                    type="button"
+                    className="quiz-start-button"
+                    onClick={
+                      selectAllCategories
+                    }
+                    disabled={
+                      loading ||
+                      categoriesLoading ||
+                      categories.length === 0 ||
+                      categoryIds.length ===
+                        categories.length
+                    }
+                    style={{
+                      width: "auto",
+                      padding: "9px 14px",
+                    }}
+                  >
+                    Tout sélectionner
+                  </button>
 
 
-                  {documents.map(
-                    (item) => (
+                  <button
+                    type="button"
+                    className="quiz-start-button"
+                    onClick={
+                      clearCategories
+                    }
+                    disabled={
+                      loading ||
+                      categoryIds.length === 0
+                    }
+                    style={{
+                      width: "auto",
+                      padding: "9px 14px",
+                    }}
+                  >
+                    Tout désélectionner
+                  </button>
 
-                      <option
-                        key={item.id}
-                        value={item.file}
-                      >
-                        {item.file}
-                      </option>
+                </div>
 
-                    )
+              </div>
+
+
+              {categoriesLoading && (
+
+                <p className="quiz-message">
+                  Chargement des catégories...
+                </p>
+
+              )}
+
+
+              {categoriesError && (
+
+                <p className="quiz-message">
+                  {categoriesError}
+                </p>
+
+              )}
+
+
+              {!categoriesLoading &&
+                !categoriesError && (
+
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "10px",
+                  }}
+                >
+
+                  {categoriesByFamily.map(
+                    (
+                      [
+                        family,
+                        familyCategories
+                      ]
+                    ) => {
+
+                      const selectedCount =
+                        familyCategories.filter(
+                          (category) =>
+                            categoryIds.includes(
+                              category.id
+                            )
+                        ).length;
+
+
+                      const allSelected =
+                        selectedCount ===
+                        familyCategories.length;
+
+
+                      const isOpen =
+                        openFamilies.has(
+                          family
+                        );
+
+
+                      const familyQuestionCounts =
+                        familyCategories.reduce(
+                          (totals, category) => ({
+                            easy:
+                              totals.easy +
+                              category.question_counts.easy,
+
+                            medium:
+                              totals.medium +
+                              category.question_counts.medium,
+
+                            hard:
+                              totals.hard +
+                              category.question_counts.hard,
+                          }),
+                          {
+                            easy: 0,
+                            medium: 0,
+                            hard: 0,
+                          }
+                        );
+
+
+                      const familyQuestionTarget =
+                        familyCategories.length * 50;
+
+
+                      return (
+
+                        <div
+                          key={family}
+                          style={{
+                            border:
+                              "1px solid #ddd",
+                            borderRadius:
+                              "10px",
+                            overflow:
+                              "hidden",
+                          }}
+                        >
+
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems:
+                                "center",
+                              justifyContent:
+                                "space-between",
+                              gap: "12px",
+                              padding:
+                                "13px 15px",
+                              background:
+                                "#f7f7f7",
+                            }}
+                          >
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                toggleFamily(
+                                  family
+                                )
+                              }
+                              disabled={
+                                loading
+                              }
+                              style={{
+                                flex: 1,
+                                border: "none",
+                                background:
+                                  "transparent",
+                                textAlign:
+                                  "left",
+                                cursor:
+                                  loading
+                                    ? "default"
+                                    : "pointer",
+                                fontSize:
+                                  "16px",
+                                fontWeight:
+                                  600,
+                                padding: 0,
+                              }}
+                            >
+
+                              <span
+                                style={{
+                                  display:
+                                    "inline-block",
+                                  width:
+                                    "22px",
+                                }}
+                              >
+                                {isOpen
+                                  ? "▼"
+                                  : "▶"}
+                              </span>
+
+                              {family}
+
+                              <span
+                                style={{
+                                  marginLeft:
+                                    "10px",
+                                  fontSize:
+                                    "13px",
+                                  fontWeight:
+                                    500,
+                                  opacity:
+                                    0.7,
+                                }}
+                              >
+                                {selectedCount} /{" "}
+                                {
+                                  familyCategories.length
+                                }
+                              </span>
+
+
+                              <div
+                                style={{
+                                  display:
+                                    "flex",
+                                  gap:
+                                    "10px",
+                                  flexWrap:
+                                    "wrap",
+                                  marginTop:
+                                    "5px",
+                                  marginLeft:
+                                    "22px",
+                                  fontSize:
+                                    "12px",
+                                  fontWeight:
+                                    400,
+                                  opacity:
+                                    0.65,
+                                }}
+                              >
+
+                                <span>
+                                  Facile{" "}
+                                  {
+                                    familyQuestionCounts.easy
+                                  }
+                                  /
+                                  {
+                                    familyQuestionTarget
+                                  }
+                                </span>
+
+
+                                <span>
+                                  Intermédiaire{" "}
+                                  {
+                                    familyQuestionCounts.medium
+                                  }
+                                  /
+                                  {
+                                    familyQuestionTarget
+                                  }
+                                </span>
+
+
+                                <span>
+                                  Difficile{" "}
+                                  {
+                                    familyQuestionCounts.hard
+                                  }
+                                  /
+                                  {
+                                    familyQuestionTarget
+                                  }
+                                </span>
+
+                              </div>
+
+                            </button>
+
+
+                            <div
+                              style={{
+                                display:
+                                  "flex",
+                                gap:
+                                  "6px",
+                              }}
+                            >
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  selectFamily(
+                                    familyCategories
+                                  )
+                                }
+                                disabled={
+                                  loading ||
+                                  allSelected
+                                }
+                                style={{
+                                  border:
+                                    "1px solid #ccc",
+                                  borderRadius:
+                                    "6px",
+                                  background:
+                                    "white",
+                                  padding:
+                                    "5px 9px",
+                                  cursor:
+                                    "pointer",
+                                  fontSize:
+                                    "12px",
+                                }}
+                              >
+                                Tout
+                              </button>
+
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  clearFamily(
+                                    familyCategories
+                                  )
+                                }
+                                disabled={
+                                  loading ||
+                                  selectedCount ===
+                                    0
+                                }
+                                style={{
+                                  border:
+                                    "1px solid #ccc",
+                                  borderRadius:
+                                    "6px",
+                                  background:
+                                    "white",
+                                  padding:
+                                    "5px 9px",
+                                  cursor:
+                                    "pointer",
+                                  fontSize:
+                                    "12px",
+                                }}
+                              >
+                                Aucun
+                              </button>
+
+                            </div>
+
+                          </div>
+
+
+                          {isOpen && (
+
+                            <div
+                              style={{
+                                display:
+                                  "grid",
+                                gridTemplateColumns:
+                                  "repeat(auto-fit, minmax(260px, 1fr))",
+                                gap: "8px",
+                                padding:
+                                  "12px",
+                              }}
+                            >
+
+                              {familyCategories.map(
+                                (category) => {
+
+                                  const selected =
+                                    categoryIds.includes(
+                                      category.id
+                                    );
+
+
+                                  return (
+
+                                    <label
+                                      key={
+                                        category.id
+                                      }
+                                      style={{
+                                        display:
+                                          "flex",
+                                        alignItems:
+                                          "flex-start",
+                                        gap:
+                                          "10px",
+                                        cursor:
+                                          loading
+                                            ? "default"
+                                            : "pointer",
+                                        padding:
+                                          "10px 11px",
+                                        borderRadius:
+                                          "7px",
+                                        border:
+                                          selected
+                                            ? "2px solid #333"
+                                            : "1px solid #ddd",
+                                        background:
+                                          selected
+                                            ? "#f2f2f2"
+                                            : "white",
+                                        opacity:
+                                          loading
+                                            ? 0.7
+                                            : 1,
+                                      }}
+                                    >
+
+                                      <input
+                                        type="checkbox"
+                                        checked={
+                                          selected
+                                        }
+                                        onChange={() =>
+                                          toggleCategory(
+                                            category.id
+                                          )
+                                        }
+                                        disabled={
+                                          loading
+                                        }
+                                        style={{
+                                          marginTop:
+                                            "3px",
+                                        }}
+                                      />
+
+
+                                      <span
+                                        style={{
+                                          display:
+                                            "flex",
+                                          flexDirection:
+                                            "column",
+                                          gap:
+                                            "3px",
+                                          minWidth:
+                                            0,
+                                        }}
+                                      >
+
+                                        <span>
+                                          {
+                                            category.name
+                                          }
+                                        </span>
+
+
+                                        <span
+                                          style={{
+                                            display:
+                                              "flex",
+                                            gap:
+                                              "8px",
+                                            flexWrap:
+                                              "wrap",
+                                            fontSize:
+                                              "12px",
+                                            opacity:
+                                              0.65,
+                                            fontWeight:
+                                              400,
+                                          }}
+                                        >
+
+                                          <span>
+                                            Facile{" "}
+                                            {
+                                              category
+                                                .question_counts
+                                                .easy
+                                            }
+                                            /50
+                                          </span>
+
+
+                                          <span>
+                                            Intermédiaire{" "}
+                                            {
+                                              category
+                                                .question_counts
+                                                .medium
+                                            }
+                                            /50
+                                          </span>
+
+
+                                          <span>
+                                            Difficile{" "}
+                                            {
+                                              category
+                                                .question_counts
+                                                .hard
+                                            }
+                                            /50
+                                          </span>
+
+                                        </span>
+
+                                      </span>
+
+                                    </label>
+
+                                  );
+                                }
+                              )}
+
+                            </div>
+
+                          )}
+
+                        </div>
+
+                      );
+
+                    }
                   )}
 
-                </select>
+                </div>
+
+              )}
+
+            </div>
 
 
-                {documentsLoading && (
+            <div className="quiz-field">
 
-                  <p
-                    className="quiz-message"
-                    style={{
-                      marginTop: "8px",
-                    }}
-                  >
-                    Chargement des documents...
-                  </p>
+              <label htmlFor="question-count">
+                Nombre de questions
+              </label>
 
-                )}
+              <select
+                id="question-count"
+                value={questionCount}
+                onChange={(event) =>
+                  setQuestionCount(
+                    event.target.value
+                  )
+                }
+                disabled={loading}
+              >
 
+                <option value="5">
+                  5 questions
+                </option>
 
-                {documentsError && (
+                <option value="10">
+                  10 questions
+                </option>
 
-                  <p
-                    className="quiz-message"
-                    style={{
-                      marginTop: "8px",
-                    }}
-                  >
-                    {documentsError}
-                  </p>
+                <option value="15">
+                  15 questions
+                </option>
 
-                )}
+                <option value="20">
+                  20 questions
+                </option>
 
-              </div>
+              </select>
 
-
-              <div className="quiz-field">
-
-                <label htmlFor="question-count">
-                  Nombre de questions
-                </label>
-
-                <select
-                  id="question-count"
-                  value={questionCount}
-                  onChange={(event) =>
-                    setQuestionCount(
-                      event.target.value
-                    )
-                  }
-                  disabled={loading}
-                >
-
-                  <option value="5">
-                    5 questions
-                  </option>
-
-                  <option value="10">
-                    10 questions
-                  </option>
-
-                  <option value="15">
-                    15 questions
-                  </option>
-
-                  <option value="20">
-                    20 questions
-                  </option>
-
-                </select>
-
-              </div>
+            </div>
 
 
-              <div className="quiz-field">
+            <div className="quiz-field">
 
-                <label htmlFor="difficulty">
-                  Difficulté
-                </label>
+              <label htmlFor="difficulty">
+                Difficulté
+              </label>
 
-                <select
-                  id="difficulty"
-                  value={difficulty}
-                  onChange={(event) =>
-                    setDifficulty(
-                      event.target.value
-                    )
-                  }
-                  disabled={loading}
-                >
+              <select
+                id="difficulty"
+                value={difficulty}
+                onChange={(event) =>
+                  setDifficulty(
+                    event.target.value
+                  )
+                }
+                disabled={loading}
+              >
 
-                  <option value="easy">
-                    Facile
-                  </option>
+                <option value="easy">
+                  Facile
+                </option>
 
-                  <option value="medium">
-                    Intermédiaire
-                  </option>
+                <option value="medium">
+                  Intermédiaire
+                </option>
 
-                  <option value="hard">
-                    Difficile
-                  </option>
+                <option value="hard">
+                  Difficile
+                </option>
 
-                </select>
-
-              </div>
+              </select>
 
             </div>
 
@@ -521,9 +1119,10 @@ function Quiz() {
               </span>
 
               <p>
-                Les questions sont générées par
-                l'intelligence artificielle à partir
-                des documents de cybersécurité.
+                Les questions sont sélectionnées
+                aléatoirement dans la banque selon
+                les catégories et la difficulté
+                choisies.
               </p>
 
             </div>
@@ -544,7 +1143,8 @@ function Quiz() {
               onClick={startQuiz}
               disabled={
                 loading ||
-                documentsLoading
+                categoriesLoading ||
+                categoryIds.length === 0
               }
             >
 
@@ -585,8 +1185,9 @@ function Quiz() {
                   <strong>
                     {generationChoice.available_count}
                   </strong>{" "}
-                  questions non vues sont actuellement
-                  disponibles.
+                  questions sont actuellement
+                  disponibles dans les catégories
+                  sélectionnées.
                 </p>
 
               </div>
@@ -649,7 +1250,9 @@ function Quiz() {
 
                         <button
                           type="button"
-                          key={option.difficulty}
+                          key={
+                            option.difficulty
+                          }
                           className="quiz-start-button"
                           onClick={() =>
                             startMixedQuiz(
