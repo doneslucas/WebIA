@@ -60,7 +60,7 @@ async def prioritize_interactive_requests(request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://172.27.30.30", "http://172.27.30.30:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
