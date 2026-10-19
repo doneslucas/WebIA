@@ -1,3 +1,5 @@
+import asyncio
+import json
 from pathlib import Path
 
 from fastapi import (
@@ -7,7 +9,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
-
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.services.auth import verify_token
@@ -73,6 +75,10 @@ def list_documents(payload: dict = Depends(verify_token)):
                             "global_progress",
                             0,
                         ),
+                        "indexing_progress": progress.get(
+                            "indexing_progress",
+                            0,
+                        ),
                     }
 
             except Exception as progress_error:
@@ -85,6 +91,7 @@ def list_documents(payload: dict = Depends(verify_token)):
                     **document,
                     "processing_status": "not_started",
                     "global_progress": 0,
+                    "indexing_progress": 0,
                 }
 
             enriched_documents.append(document)
@@ -133,6 +140,88 @@ def document_progress(
         )
 
 
+@router.get("/{filename}/progress/stream")
+async def document_progress_stream(
+    filename: str,
+    payload: dict = Depends(verify_token),
+):
+    filename = Path(filename).name
+
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Seuls les fichiers PDF sont acceptés.",
+        )
+
+    async def event_stream():
+        previous_payload = None
+        last_keepalive = asyncio.get_running_loop().time()
+        completed_observations = 0
+
+        try:
+            while True:
+                progress = await run_in_threadpool(
+                    get_generation_progress,
+                    filename,
+                )
+
+                serialized = json.dumps(
+                    progress,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+
+                if serialized != previous_payload:
+                    yield (
+                        "event: progress\n"
+                        f"data: {serialized}\n\n"
+                    )
+                    previous_payload = serialized
+                    last_keepalive = (
+                        asyncio.get_running_loop().time()
+                    )
+
+                status = progress.get("status")
+
+                # Une indexation peut passer brièvement par completed
+                # avant que la génération manuelle soit mise en attente.
+                # On attend donc plusieurs lectures avant de fermer le flux.
+                if status == "completed":
+                    completed_observations += 1
+                else:
+                    completed_observations = 0
+
+                if status in {"waiting_manual", "error"}:
+                    yield "event: end\ndata: {}\n\n"
+                    break
+
+                if completed_observations >= 3:
+                    yield "event: end\ndata: {}\n\n"
+                    break
+
+                now = asyncio.get_running_loop().time()
+
+                if now - last_keepalive >= 15:
+                    yield ": keepalive\n\n"
+                    last_keepalive = now
+
+                await asyncio.sleep(0.5)
+
+        except asyncio.CancelledError:
+            # Le navigateur a fermé le flux SSE.
+            raise
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
@@ -171,8 +260,6 @@ async def upload_document(
             ),
         )
 
-    # Réserver l'indexation avant d'écrire le fichier ou de commencer
-    # son traitement. La réservation est atomique côté backend.
     acquired = await run_in_threadpool(
         task_manager.start_pdf_indexing
     )
@@ -231,7 +318,6 @@ async def upload_document(
         )
 
     finally:
-        # Libération garantie, même si l'indexation échoue.
         await run_in_threadpool(
             task_manager.end_pdf_indexing
         )
@@ -257,6 +343,7 @@ def generate_document_questions(
         (item for item in documents if item.get("file") == filename),
         None,
     )
+
     if document is None:
         raise HTTPException(
             status_code=404,
@@ -264,6 +351,7 @@ def generate_document_questions(
         )
 
     category_ids = get_document_category_ids(document["id"])
+
     if not category_ids:
         raise HTTPException(
             status_code=409,
@@ -283,6 +371,7 @@ def generate_document_questions(
             f"[Documents] Impossible de lancer la génération pour "
             f"{filename} : {error}"
         )
+
         raise HTTPException(
             status_code=500,
             detail="Impossible de lancer la génération des questions.",
@@ -293,7 +382,11 @@ def generate_document_questions(
         "filename": filename,
         "category_ids": category_ids,
         "difficulties": ["easy", "medium", "hard"],
-        "queued_tasks": len(result.get("queued", [])) if isinstance(result, dict) else 0,
+        "queued_tasks": (
+            len(result.get("queued", []))
+            if isinstance(result, dict)
+            else 0
+        ),
         "status": "queued",
     }
 
@@ -313,12 +406,11 @@ def remove_document(
             detail="Seuls les fichiers PDF peuvent être supprimés.",
         )
 
-    # La suppression conserve son fonctionnement indépendant :
-    # elle ne demande pas le verrou exclusif d'indexation.
     task_manager.start_pdf_operation()
 
     try:
         from app.services.question_bank_manager import question_bank_manager
+
         question_bank_manager.cancel_document_tasks(filename)
 
         result = delete_document(

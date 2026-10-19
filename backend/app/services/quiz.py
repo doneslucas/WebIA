@@ -630,8 +630,8 @@ def generate_quiz_batch(
         category_name if category_name else "Aucune catégorie spécifique"
     )
 
-    # Une sélection évite d'envoyer une liste gigantesque au modèle.
-    # La sauvegarde PostgreSQL vérifie elle aussi chaque doublon.
+    # Conserve une liste limitée pour éviter un prompt initial trop volumineux.
+    # Les questions rejetées seront ajoutées explicitement lors des relances.
     excluded_sample = sorted(excluded_questions)[:60]
 
     prompt = f"""
@@ -662,6 +662,13 @@ N'ajoute aucune connaissance externe et n'invente aucun fait.
 Si le contenu est insuffisant, retourne uniquement les questions fiables.
 Si aucune question fiable n'est possible, retourne {{"questions": []}}.
 
+RÈGLES ANTI-DOUBLONS :
+- Ne reproduis aucune question déjà utilisée.
+- Évite de reformuler simplement une question existante.
+- Cherche des informations différentes dans le contenu source.
+- Si plusieurs questions sont demandées, varie les informations évaluées.
+- Ne crée pas artificiellement de questions si le document ne le permet pas.
+
 FORMAT JSON OBLIGATOIRE :
 {{
   "questions": [
@@ -687,7 +694,7 @@ RÈGLES DE VALIDATION :
 5. Chaque question doit contenir exactement quatre options.
 6. Les quatre options doivent être différentes et non vides.
 7. Une seule option est correcte.
-8. "correct_answer" est l'index de la bonne option : 0, 1, 2 ou 3.
+8. "correct_answer" est l'index de la bonne réponse : 0, 1, 2 ou 3.
 9. "explanation" doit être non vide et justifiée par le document.
 10. Respecte strictement la difficulté demandée.
 11. N'utilise aucune connaissance externe.
@@ -700,6 +707,7 @@ Retourne uniquement l'objet JSON final.
 """
 
     last_error = None
+    rejected_questions = set()
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         retry_prompt = prompt
@@ -707,13 +715,21 @@ Retourne uniquement l'objet JSON final.
         if attempt > 1:
             retry_prompt += f"""
 
-CORRECTION DE TA RÉPONSE PRÉCÉDENTE :
-La tentative précédente n'a pas produit de lot exploitable.
+CORRECTION OBLIGATOIRE DE TA RÉPONSE PRÉCÉDENTE :
+La tentative précédente n'a pas produit suffisamment de questions exploitables.
 Erreur détectée : {last_error}
 
-Recommence en corrigeant ce problème.
-Vérifie le JSON, les quatre options, l'index de la bonne réponse
-et l'explication. N'ajoute aucun texte hors JSON.
+QUESTIONS PRÉCÉDEMMENT REJETÉES :
+{json.dumps(sorted(rejected_questions), ensure_ascii=False)}
+
+Consignes supplémentaires :
+- Ne reproduis aucune des questions rejetées ci-dessus.
+- Ne te contente pas de modifier quelques mots d'une question rejetée.
+- Cherche un autre fait ou un autre aspect précis du contenu source.
+- Respecte exactement le format JSON, les quatre options et la difficulté demandée.
+- Si aucune nouvelle question fiable n'est possible, retourne
+  {{"questions": []}}.
+- N'ajoute aucun texte en dehors du JSON.
 """
 
         try:
@@ -743,6 +759,10 @@ et l'explication. N'ajoute aucun texte hors JSON.
                     rejection_reasons[reason] = (
                         rejection_reasons.get(reason, 0) + 1
                     )
+
+                    # Transmet les questions effectivement rejetées
+                    # au prompt des tentatives suivantes.
+                    rejected_questions.add(normalized)
                     continue
 
                 local_questions.add(normalized)
@@ -792,7 +812,6 @@ et l'explication. N'ajoute aucun texte hors JSON.
         "Impossible de générer un lot de questions valide. "
         f"Dernière erreur : {last_error}"
     )
-
 
 # ============================================================
 # SAUVEGARDE DES QUESTIONS

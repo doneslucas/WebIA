@@ -1,29 +1,39 @@
 
-"""Répare les catégories des chunks liés aux questions existantes.
+"""Classe les chunks WebIA dont la catégorie est manquante.
 
-- Ne supprime aucune question.
-- Ne modifie aucun chunk_id de question.
-- Ne réindexe aucun PDF.
-- Ne traite que les chunks sans catégorie qui possèdent déjà des questions.
+Garanties :
 - Utilise exclusivement les 50 catégories prédéfinies.
-- Ne modifie pas question_limit.
+- Récupère les textes existants dans ChromaDB sans réindexer les PDF.
+- Enregistre les catégories au fur et à mesure.
+- Ignore les chunks déjà classés pour permettre la reprise.
+- Ne supprime ni ne modifie les questions existantes.
+- Ne modifie ni question_count ni question_limit.
+- Le mode --dry-run ne lance pas Ollama et ne modifie aucune donnée.
 """
 
 import argparse
+from collections import Counter
 
 from app.database.connection import get_connection
 from app.services.chroma import collection
 from app.services.categories import get_all_categories
-from app.services.category_classifier import classify_chunks_batch
+from app.services.category_classifier import (
+    classify_chunk,
+    classify_chunks_batch,
+)
 
 
-# ============================================================
-# LECTURE DE LA BASE
-# ============================================================
+EXPECTED_CATEGORY_COUNT = 50
+DEFAULT_BATCH_SIZE = 5
+CHROMA_BATCH_SIZE = 100
+MAX_INDIVIDUAL_RETRIES = 2
 
-def get_missing_chunks_with_questions():
-    """Retourne les chunks sans catégorie utilisés par des questions."""
-    with get_connection() as conn:
+
+def get_missing_chunks():
+    """Retourne tous les chunks sans catégorie, avec ou sans QCM."""
+    conn = get_connection()
+
+    try:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
@@ -32,396 +42,308 @@ def get_missing_chunks_with_questions():
                     dc.document_id,
                     d.file_name,
                     dc.chunk_index,
-                    dc.chroma_id,
-                    COUNT(qq.id) AS question_count
-                FROM document_chunks dc
-                JOIN documents d
-                    ON d.id = dc.document_id
-                JOIN quiz_questions qq
-                    ON qq.chunk_id = dc.id
-                WHERE dc.category_id IS NULL
-                GROUP BY
-                    dc.id,
-                    dc.document_id,
-                    d.file_name,
-                    dc.chunk_index,
                     dc.chroma_id
-                ORDER BY
-                    dc.document_id,
-                    dc.chunk_index
+                FROM document_chunks dc
+                JOIN documents d ON d.id = dc.document_id
+                WHERE dc.category_id IS NULL
+                ORDER BY dc.document_id, dc.chunk_index
                 """
             )
             return cursor.fetchall()
+    finally:
+        conn.close()
 
 
-def count_questions_without_valid_chunk():
-    """Compte les questions sans chunk correspondant."""
-    with get_connection() as conn:
+def get_chroma_texts(chroma_ids):
+    """Récupère les textes déjà indexés dans ChromaDB."""
+    texts = {}
+    unique_ids = list(dict.fromkeys(
+        chroma_id for chroma_id in chroma_ids if chroma_id
+    ))
+
+    for offset in range(0, len(unique_ids), CHROMA_BATCH_SIZE):
+        batch_ids = unique_ids[offset:offset + CHROMA_BATCH_SIZE]
+
+        result = collection.get(
+            ids=batch_ids,
+            include=["documents"],
+        )
+
+        returned_ids = result.get("ids") or []
+        documents = result.get("documents") or []
+
+        for chroma_id, document_text in zip(returned_ids, documents):
+            if isinstance(document_text, str) and document_text.strip():
+                texts[chroma_id] = document_text
+
+    return texts
+
+
+def validate_categories(categories):
+    """Vérifie la liste fermée des 50 catégories."""
+    if len(categories) != EXPECTED_CATEGORY_COUNT:
+        raise RuntimeError(
+            f"{EXPECTED_CATEGORY_COUNT} catégories attendues, "
+            f"{len(categories)} trouvées."
+        )
+
+    allowed_ids = set()
+
+    for category in categories:
+        try:
+            category_id = int(category["id"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"Catégorie invalide : {category!r}"
+            ) from error
+
+        if category_id in allowed_ids:
+            raise RuntimeError(
+                f"Identifiant de catégorie dupliqué : {category_id}"
+            )
+
+        allowed_ids.add(category_id)
+
+    return allowed_ids
+
+
+def save_category(chunk_id, document_id, category_id):
+    """Enregistre une catégorie sans modifier les compteurs ni les QCM."""
+    conn = get_connection()
+
+    try:
         with conn.cursor() as cursor:
+            # Ne touche qu'aux chunks toujours sans catégorie.
             cursor.execute(
                 """
-                SELECT COUNT(*)
-                FROM quiz_questions qq
-                LEFT JOIN document_chunks dc
-                    ON dc.id = qq.chunk_id
-                WHERE qq.chunk_id IS NULL
-                   OR dc.id IS NULL
-                """
+                UPDATE document_chunks
+                SET category_id = %s
+                WHERE id = %s
+                  AND category_id IS NULL
+                RETURNING id
+                """,
+                (category_id, chunk_id),
             )
-            return cursor.fetchone()[0]
 
+            updated = cursor.fetchone()
 
-# ============================================================
-# LECTURE DES TEXTES EXISTANTS DANS CHROMADB
-# ============================================================
+            if updated is None:
+                conn.rollback()
+                return False
 
-def get_chroma_texts(rows):
-    """Récupère les textes existants sans réindexer les documents."""
-    ids = [row[4] for row in rows if row[4]]
-
-    if not ids:
-        return {}
-
-    result = collection.get(
-        ids=ids,
-        include=["documents"],
-    )
-
-    result_ids = result.get("ids") or []
-    documents = result.get("documents") or []
-
-    return {
-        chroma_id: text
-        for chroma_id, text in zip(result_ids, documents)
-        if (
-            isinstance(chroma_id, str)
-            and isinstance(text, str)
-            and text.strip()
-        )
-    }
-
-
-# ============================================================
-# ENREGISTREMENT DES CATÉGORIES
-# ============================================================
-
-def write_categories(rows_and_categories):
-    """
-    Attribue une catégorie aux chunks encore non classés.
-
-    Les questions restent liées à leurs chunks d'origine.
-    """
-    updated_count = 0
-
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
-            for row, category in rows_and_categories:
-                (
-                    chunk_id,
-                    document_id,
-                    _file_name,
-                    _chunk_index,
-                    _chroma_id,
-                    _question_count,
-                ) = row
-
-                if not isinstance(category, dict) or "id" not in category:
-                    continue
-
-                category_id = int(category["id"])
-
-                cursor.execute(
-                    """
-                    UPDATE document_chunks
-                    SET category_id = %s
-                    WHERE id = %s
-                      AND category_id IS NULL
-                    RETURNING id
-                    """,
-                    (category_id, chunk_id),
-                )
-
-                if cursor.fetchone() is None:
-                    continue
-
-                # Ajoute le lien document-catégorie s'il manque.
-                cursor.execute(
-                    """
-                    INSERT INTO document_categories (
-                        document_id,
-                        category_id
-                    )
-                    SELECT %s, %s
-                    WHERE NOT EXISTS (
-                        SELECT 1
-                        FROM document_categories
-                        WHERE document_id = %s
-                          AND category_id = %s
-                    )
-                    """,
-                    (
-                        document_id,
-                        category_id,
-                        document_id,
-                        category_id,
-                    ),
-                )
-
-                updated_count += 1
-
-        conn.commit()
-
-    return updated_count
-
-
-# ============================================================
-# SYNCHRONISATION DES COMPTEURS ET DES ASSOCIATIONS
-# ============================================================
-
-def sync_category_links_and_counts():
-    """
-    Complète les associations document-catégorie existantes
-    et recalcule les compteurs sans toucher aux questions.
-    """
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
             cursor.execute(
                 """
                 INSERT INTO document_categories (
                     document_id,
                     category_id
                 )
-                SELECT DISTINCT
-                    dc.document_id,
-                    dc.category_id
-                FROM document_chunks dc
-                WHERE dc.category_id IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM document_categories dcat
-                      WHERE dcat.document_id = dc.document_id
-                        AND dcat.category_id = dc.category_id
-                  )
-                """
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (document_id, category_id),
             )
-            links_added = cursor.rowcount
-
-            cursor.execute(
-                """
-                UPDATE document_chunks dc
-                SET question_count = (
-                    SELECT COUNT(*)
-                    FROM quiz_questions qq
-                    WHERE qq.chunk_id = dc.id
-                )
-                WHERE dc.question_count IS DISTINCT FROM (
-                    SELECT COUNT(*)
-                    FROM quiz_questions qq
-                    WHERE qq.chunk_id = dc.id
-                )
-                """
-            )
-            counters_fixed = cursor.rowcount
 
         conn.commit()
+        return True
 
-    return links_added, counters_fixed
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
 
 
-# ============================================================
-# PROGRAMME PRINCIPAL
-# ============================================================
+def classify_with_retry(text, categories):
+    """Réessaie individuellement un chunk si le lot ne l'a pas classé."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    for attempt in range(MAX_INDIVIDUAL_RETRIES):
+        try:
+            category = classify_chunk(
+                text,
+                categories,
+                require_category=(attempt == 1),
+            )
+
+            if isinstance(category, dict) and category.get("id") is not None:
+                return category
+
+        except Exception as error:
+            print(
+                f"[Repair] Nouvelle tentative individuelle "
+                f"{attempt + 1}/{MAX_INDIVIDUAL_RETRIES} : {error}"
+            )
+
+    return None
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
 
     parser.add_argument(
-        "--apply",
+        "--dry-run",
         action="store_true",
-        help=(
-            "Applique la classification. "
-            "Cette opération utilise Ollama."
-        ),
+        help="Vérifie les chunks sans lancer Ollama ni modifier la base.",
     )
 
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=5,
-        help="Nombre de chunks par lot, entre 1 et 10.",
+        default=DEFAULT_BATCH_SIZE,
+        choices=range(1, 11),
+        metavar="{1,2,3,4,5,6,7,8,9,10}",
+        help="Nombre de chunks par lot (défaut : 5).",
     )
 
     args = parser.parse_args()
 
-    if not 1 <= args.batch_size <= 10:
-        parser.error("--batch-size doit être compris entre 1 et 10.")
-
     categories = get_all_categories()
-
-    # LA RAISON : conserver exactement les catégories prédéfinies.
-    if len(categories) != 50:
-        raise RuntimeError(
-            f"50 catégories sont attendues, mais la base en retourne "
-            f"{len(categories)}. Aucune réparation effectuée."
-        )
-
-    rows = get_missing_chunks_with_questions()
-    orphan_questions = count_questions_without_valid_chunk()
+    allowed_ids = validate_categories(categories)
+    chunks = get_missing_chunks()
 
     print(f"[Repair] Catégories autorisées : {len(categories)}")
-    print(
-        "[Repair] Chunks sans catégorie utilisés par des questions : "
-        f"{len(rows)}"
-    )
-    print(
-        "[Repair] Questions sans chunk correspondant : "
-        f"{orphan_questions}"
-    )
+    print(f"[Repair] Chunks sans catégorie : {len(chunks)}")
 
-    if not args.apply:
-        print(
-            "[Repair] Diagnostic uniquement. "
-            "Aucune donnée modifiée."
-        )
-        print(
-            "[Repair] Pour appliquer la réparation, "
-            "relancer avec --apply."
-        )
+    if not chunks:
+        print("[Repair] Aucun chunk à classer.")
         return
 
-    if not rows:
-        links_added, counters_fixed = sync_category_links_and_counts()
+    chroma_ids = [row[4] for row in chunks if row[4]]
+    texts_by_id = get_chroma_texts(chroma_ids)
 
-        print("[Repair] Aucun chunk à catégoriser pour les questions existantes.")
-        print(f"[Repair] Associations ajoutées : {links_added}")
-        print(f"[Repair] Compteurs corrigés : {counters_fixed}")
+    missing_texts = sum(
+        1 for row in chunks
+        if not row[4] or row[4] not in texts_by_id
+    )
+
+    print(f"[Repair] Textes récupérés dans ChromaDB : {len(texts_by_id)}")
+    print(f"[Repair] Textes absents : {missing_texts}")
+
+    if args.dry_run:
+        print("[Repair] Diagnostic terminé : aucune donnée modifiée.")
         return
 
-    classified_count = 0
-    unresolved_count = 0
-    missing_chroma_count = 0
-    errors = []
+    assigned = 0
+    unresolved = 0
+    sql_errors = 0
+    category_counts = Counter()
 
-    for offset in range(0, len(rows), args.batch_size):
-        batch_rows = rows[offset:offset + args.batch_size]
-        texts_by_id = get_chroma_texts(batch_rows)
+    for offset in range(0, len(chunks), args.batch_size):
+        batch_rows = chunks[offset:offset + args.batch_size]
 
         valid_rows = []
-        texts = []
+        batch_texts = []
 
         for row in batch_rows:
-            chunk_text = texts_by_id.get(row[4]) if row[4] else None
+            chroma_id = row[4]
+            chunk_text = texts_by_id.get(chroma_id) if chroma_id else None
 
             if not chunk_text:
-                missing_chroma_count += 1
-                errors.append(
-                    f"Chunk {row[0]} ({row[2]}, index {row[3]}) : "
-                    "texte absent de ChromaDB."
+                unresolved += 1
+                print(
+                    f"[Repair] Chunk {row[0]} : texte absent, "
+                    "il reste sans catégorie."
                 )
                 continue
 
             valid_rows.append(row)
-            texts.append(chunk_text)
+            batch_texts.append(chunk_text)
 
-        if texts:
+        results = []
+
+        if batch_texts:
             try:
-                batch_categories = classify_chunks_batch(
-                    texts,
+                results = classify_chunks_batch(
+                    batch_texts,
                     categories,
                     batch_size=args.batch_size,
-                    require_category=True,
+                    require_category=False,
                 )
             except Exception as error:
-                unresolved_count += len(valid_rows)
-                errors.append(
-                    f"Lot à partir de {offset + 1} : "
-                    f"échec de classification : {error}"
+                print(
+                    f"[Repair] Échec du lot {offset + 1} : {error}"
                 )
-                continue
+                results = [None] * len(valid_rows)
 
-            if len(batch_categories) != len(valid_rows):
-                unresolved_count += len(valid_rows)
-                errors.append(
-                    f"Lot à partir de {offset + 1} : "
-                    "le nombre de catégories retournées ne correspond "
-                    "pas au nombre de chunks."
+        if len(results) != len(valid_rows):
+            results = [None] * len(valid_rows)
+
+        for row, chunk_text, category in zip(
+            valid_rows, batch_texts, results
+        ):
+            chunk_id, document_id, file_name, chunk_index, chroma_id = row
+
+            try:
+                category_id = (
+                    int(category["id"])
+                    if isinstance(category, dict)
+                    and category.get("id") is not None
+                    else None
                 )
-                continue
+            except (TypeError, ValueError):
+                category_id = None
 
-            rows_to_write = []
-
-            for row, category in zip(valid_rows, batch_categories):
-                if not isinstance(category, dict) or "id" not in category:
-                    unresolved_count += 1
-                    errors.append(
-                        f"Chunk {row[0]} : aucune catégorie valide retournée."
-                    )
-                    continue
+            if category_id not in allowed_ids:
+                category = classify_with_retry(chunk_text, categories)
 
                 try:
-                    category_id = int(category["id"])
+                    category_id = (
+                        int(category["id"])
+                        if isinstance(category, dict)
+                        and category.get("id") is not None
+                        else None
+                    )
                 except (TypeError, ValueError):
-                    unresolved_count += 1
-                    errors.append(
-                        f"Chunk {row[0]} : identifiant de catégorie invalide."
-                    )
-                    continue
+                    category_id = None
 
-                if not any(
-                    int(known_category["id"]) == category_id
-                    for known_category in categories
-                ):
-                    unresolved_count += 1
-                    errors.append(
-                        f"Chunk {row[0]} : catégorie {category_id} "
-                        "absente de la liste autorisée."
-                    )
-                    continue
+            if category_id not in allowed_ids:
+                unresolved += 1
+                print(
+                    f"[Repair] Chunk {chunk_id} non résolu ; "
+                    "il sera réessayé lors d'une prochaine exécution."
+                )
+                continue
 
-                rows_to_write.append((row, category))
+            try:
+                if save_category(chunk_id, document_id, category_id):
+                    assigned += 1
+                    category_counts[category_id] += 1
 
-            if rows_to_write:
-                try:
-                    classified_count += write_categories(rows_to_write)
-                except Exception as error:
-                    unresolved_count += len(rows_to_write)
-                    errors.append(
-                        f"Lot à partir de {offset + 1} : "
-                        f"échec d'écriture PostgreSQL : {error}"
-                    )
+            except Exception as error:
+                sql_errors += 1
+                print(
+                    f"[Repair] Erreur PostgreSQL pour le chunk "
+                    f"{chunk_id} : {error}"
+                )
 
-        processed = min(offset + len(batch_rows), len(rows))
+        processed = min(offset + len(batch_rows), len(chunks))
 
         print(
-            f"[Repair] Traités {processed}/{len(rows)}"
-            f" | catégories attribuées={classified_count}"
-            f" | non résolus={unresolved_count}"
-            f" | textes absents={missing_chroma_count}"
+            f"[Repair] Progression {processed}/{len(chunks)}"
+            f" | attribuées={assigned}"
+            f" | non résolus={unresolved}"
+            f" | erreurs SQL={sql_errors}"
         )
 
-    links_added, counters_fixed = sync_category_links_and_counts()
+    remaining = len(get_missing_chunks())
 
-    remaining = len(get_missing_chunks_with_questions())
-    orphan_questions = count_questions_without_valid_chunk()
-
-    print("\n[Repair] Résultat final")
-    print(f"[Repair] Chunks catégorisés : {classified_count}")
-    print(f"[Repair] Textes absents de ChromaDB : {missing_chroma_count}")
-    print(f"[Repair] Chunks non résolus : {unresolved_count}")
-    print(f"[Repair] Chunks encore sans catégorie avec questions : {remaining}")
-    print(f"[Repair] Questions sans chunk correspondant : {orphan_questions}")
-    print(f"[Repair] Associations document-catégorie ajoutées : {links_added}")
-    print(f"[Repair] Compteurs corrigés : {counters_fixed}")
-
-    if errors:
-        print("\n[Repair] Éléments à examiner :")
-        for error in errors:
-            print(f"- {error}")
-
+    print("\n========== RÉSULTAT FINAL ==========")
+    print(f"Catégories attribuées pendant cette exécution : {assigned}")
+    print(f"Chunks non résolus : {unresolved}")
+    print(f"Erreurs SQL : {sql_errors}")
+    print(f"Chunks encore sans catégorie : {remaining}")
     print(
-        "\n[Repair] Les questions et leurs chunk_id ont été conservés. "
-        "Aucun PDF n'a été réindexé et question_limit n'a pas été modifié."
+        "[Repair] Questions, chunk_id, question_count et question_limit "
+        "préservés."
     )
+
+    if remaining:
+        print(
+            "[Repair] Tu peux relancer la même commande : "
+            "les chunks déjà classés seront ignorés."
+        )
 
 
 if __name__ == "__main__":

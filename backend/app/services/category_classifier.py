@@ -1,8 +1,10 @@
+
 """Classification contrôlée des chunks WebIA dans la liste fixe de catégories."""
 
 import json
 import os
 import re
+import time
 from typing import Any, Optional
 
 from dotenv import load_dotenv
@@ -14,15 +16,74 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "localhost")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_BASE_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 CATEGORY_MODEL = os.getenv("CATEGORY_MODEL", "qwen2.5:7b")
+
+try:
+    OLLAMA_TIMEOUT_SECONDS = max(
+        1,
+        int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120")),
+    )
+except (TypeError, ValueError):
+    OLLAMA_TIMEOUT_SECONDS = 120
+
 DEFAULT_BATCH_SIZE = 5
+
+
+# ============================================================
+# MODÈLE OLLAMA
+# ============================================================
 
 llm = OllamaLLM(
     model=CATEGORY_MODEL,
     base_url=OLLAMA_BASE_URL,
     temperature=0.1,
     format="json",
+    client_kwargs={
+        "timeout": OLLAMA_TIMEOUT_SECONDS,
+    },
 )
 
+
+def _invoke_classifier(prompt: str, context: str) -> Any:
+    """Appelle Ollama avec mesure du temps et journalisation."""
+    started_at = time.monotonic()
+
+    print(
+        f"[Classifier] Début : {context} | "
+        f"modèle={CATEGORY_MODEL} | "
+        f"délai maximal={OLLAMA_TIMEOUT_SECONDS}s",
+        flush=True,
+    )
+
+    try:
+        response = llm.invoke(prompt)
+
+        elapsed = time.monotonic() - started_at
+
+        print(
+            f"[Classifier] Réponse reçue : {context} | "
+            f"durée={elapsed:.1f}s",
+            flush=True,
+        )
+
+        return response
+
+    except Exception as error:
+        elapsed = time.monotonic() - started_at
+
+        print(
+            f"[Classifier] Échec : {context} | "
+            f"durée={elapsed:.1f}s | "
+            f"type={type(error).__name__} | "
+            f"erreur={error}",
+            flush=True,
+        )
+
+        raise
+
+
+# ============================================================
+# LECTURE DE LA RÉPONSE JSON
+# ============================================================
 
 def _extract_json(response: Any) -> dict:
     """Parse la réponse JSON d'Ollama, même si elle contient des fences."""
@@ -58,6 +119,10 @@ def _extract_json(response: Any) -> dict:
     return parsed
 
 
+# ============================================================
+# CATÉGORIES AUTORISÉES
+# ============================================================
+
 def _allowed_category_map(
     allowed_categories: list[dict],
 ) -> tuple[dict[int, dict], dict[str, dict]]:
@@ -71,7 +136,11 @@ def _allowed_category_map(
         category_id = category.get("id")
         name = category.get("name")
 
-        if category_id is None or not isinstance(name, str) or not name.strip():
+        if (
+            category_id is None
+            or not isinstance(name, str)
+            or not name.strip()
+        ):
             continue
 
         try:
@@ -119,6 +188,22 @@ def _resolve_category(
     return None
 
 
+def _build_category_lines(
+    by_id: dict[int, dict],
+) -> list[str]:
+    return [
+        (
+            f'{category_id}: {category.get("name", "")} '
+            f'(famille: {category.get("family", "")})'
+        )
+        for category_id, category in sorted(by_id.items())
+    ]
+
+
+# ============================================================
+# CLASSIFICATION D'UN CHUNK
+# ============================================================
+
 def classify_chunk(
     chunk_text: str,
     allowed_categories: list[dict],
@@ -133,14 +218,7 @@ def classify_chunk(
         return None
 
     by_id, by_name = _allowed_category_map(allowed_categories)
-
-    category_lines = [
-        (
-            f'{category_id}: {category.get("name", "")} '
-            f'(famille: {category.get("family", "")})'
-        )
-        for category_id, category in sorted(by_id.items())
-    ]
+    category_lines = _build_category_lines(by_id)
 
     if require_category:
         null_rule = (
@@ -175,7 +253,12 @@ Texte du chunk :
 </chunk>
 """
 
-    parsed = _extract_json(llm.invoke(prompt))
+    response = _invoke_classifier(
+        prompt,
+        context="classification individuelle",
+    )
+
+    parsed = _extract_json(response)
     value = parsed.get(
         "category_id",
         parsed.get("category", parsed.get("id")),
@@ -190,6 +273,10 @@ Texte du chunk :
 
     return category
 
+
+# ============================================================
+# CLASSIFICATION PAR LOTS
+# ============================================================
 
 def classify_chunks_batch(
     chunk_texts: list[str],
@@ -206,15 +293,8 @@ def classify_chunks_batch(
         raise ValueError("batch_size doit être compris entre 1 et 10.")
 
     by_id, by_name = _allowed_category_map(allowed_categories)
+    category_lines = _build_category_lines(by_id)
     output: list[Optional[dict]] = [None] * len(chunk_texts)
-
-    category_lines = [
-        (
-            f'{category_id}: {category.get("name", "")} '
-            f'(famille: {category.get("family", "")})'
-        )
-        for category_id, category in sorted(by_id.items())
-    ]
 
     for offset in range(0, len(chunk_texts), batch_size):
         batch = chunk_texts[offset:offset + batch_size]
@@ -269,7 +349,15 @@ Extraits :
 """
 
         try:
-            parsed = _extract_json(llm.invoke(prompt))
+            response = _invoke_classifier(
+                prompt,
+                context=(
+                    f"lot {offset + 1}-"
+                    f"{offset + len(batch)}"
+                ),
+            )
+
+            parsed = _extract_json(response)
             entries = parsed.get("classifications")
 
             if not isinstance(entries, list):
@@ -322,8 +410,10 @@ Extraits :
 
         except Exception as batch_error:
             print(
-                f"[Classifier] Lot {offset + 1}-{offset + len(batch)} "
-                f"invalide ({batch_error}); reprise chunk par chunk."
+                f"[Classifier] Lot {offset + 1}-"
+                f"{offset + len(batch)} invalide "
+                f"({batch_error}); reprise chunk par chunk.",
+                flush=True,
             )
 
             for local_index in usable_indices:
@@ -338,12 +428,17 @@ Extraits :
                 except Exception as error:
                     print(
                         f"[Classifier] Chunk {global_index + 1} "
-                        f"non classé : {error}"
+                        f"non classé : {error}",
+                        flush=True,
                     )
                     output[global_index] = None
 
     return output
 
+
+# ============================================================
+# CATÉGORIES DISTINCTES D'UN DOCUMENT
+# ============================================================
 
 def detect_document_categories(
     chunks: list[str],

@@ -1,3 +1,4 @@
+
 from pathlib import Path
 import hashlib
 
@@ -119,15 +120,36 @@ def initialize_progress(filename: str):
 
 def update_indexing_progress(
     filename: str,
-    progress: int,
+    progress: int | None,
     status: str = "indexing",
     stage: str = "",
     details: str = "",
 ):
+    """
+    Met à jour l'étape d'indexation.
+
+    La valeur du pourcentage est exclusivement pilotée par la
+    classification des chunks.
+
+    progress=None conserve le dernier pourcentage connu. Cela permet
+    aux étapes hash, PDF, embeddings, ChromaDB et PostgreSQL de mettre
+    à jour leur statut sans modifier le pourcentage de classification.
+    """
     if filename not in generation_progress:
         initialize_progress(filename)
 
-    progress = max(0, min(100, int(progress)))
+    current_indexing = generation_progress[filename].get(
+        "indexing",
+        get_default_indexing_progress(),
+    )
+
+    if progress is None:
+        progress = generation_progress[filename].get(
+            "indexing_progress",
+            current_indexing.get("progress", 0),
+        )
+    else:
+        progress = max(0, min(100, int(progress)))
 
     generation_progress[filename]["indexing"] = {
         "status": status,
@@ -696,9 +718,10 @@ def index_pdf(
 
     initialize_progress(requested_filename)
 
+    # Le hash ne fait pas partie de la progression de classification.
     update_indexing_progress(
         filename=requested_filename,
-        progress=5,
+        progress=0,
         status="indexing",
         stage="hash",
         details="Calcul du hash SHA-256...",
@@ -712,9 +735,10 @@ def index_pdf(
             f"{requested_filename} : {file_hash}"
         )
 
+        # La vérification ne modifie pas le pourcentage.
         update_indexing_progress(
             filename=requested_filename,
-            progress=10,
+            progress=0,
             status="indexing",
             stage="verification",
             details="Vérification de PostgreSQL et ChromaDB...",
@@ -768,9 +792,6 @@ def index_pdf(
                     canonical_document_id
                 )
 
-                # L'absence de catégories ne provoque jamais une réindexation
-                # de ce document déjà stocké : les questions y sont rattachées
-                # aux chunks et peuvent être supprimées en cascade.
                 queue_document_question_banks(
                     filename=canonical_filename,
                     category_ids=canonical_category_ids,
@@ -863,7 +884,6 @@ def index_pdf(
                     }
 
                 if not force_reindex and not chroma_indexed:
-                    # Ne supprime pas les chunks/questions qui restent en base.
                     raise ValueError(
                         f"{requested_filename} existe dans PostgreSQL, "
                         "mais n'est plus indexé dans ChromaDB. La récupération "
@@ -880,10 +900,6 @@ def index_pdf(
                 content_changed = True
 
             else:
-                # Un changement de contenu est un cas différent d'une réparation
-                # de catégories. On garde le comportement de réindexation,
-                # mais on ne l'utilise jamais simplement parce qu'une catégorie
-                # manque.
                 print(
                     "[Indexer] Le hash a changé pour "
                     f"{requested_filename} : réindexation du contenu nécessaire."
@@ -953,9 +969,10 @@ def index_pdf(
             task_manager.start_pdf_operation()
 
         try:
+            # La lecture du PDF ne modifie pas le pourcentage.
             update_indexing_progress(
                 filename=requested_filename,
-                progress=15,
+                progress=0,
                 status="indexing",
                 stage="pdf",
                 details="Lecture du PDF...",
@@ -963,9 +980,10 @@ def index_pdf(
 
             documents = load_pdf(file_path)
 
+            # Le découpage ne modifie pas le pourcentage.
             update_indexing_progress(
                 filename=requested_filename,
-                progress=20,
+                progress=0,
                 status="indexing",
                 stage="chunks",
                 details="Découpage du document en chunks...",
@@ -991,12 +1009,15 @@ def index_pdf(
             # CLASSIFICATION DES CHUNKS
             # =================================================
 
+            total_chunks = len(chunks)
+
+            # La progression commence à 0 % au début de la classification.
             update_indexing_progress(
                 filename=requested_filename,
-                progress=22,
+                progress=0,
                 status="indexing",
                 stage="categories",
-                details=f"Classification des chunks : 0/{len(chunks)}",
+                details=f"Classification des chunks : 0/{total_chunks}",
             )
 
             task_manager.wait_for_pdf_permission()
@@ -1016,7 +1037,6 @@ def index_pdf(
             valid_texts = list(texts)
             chunk_categories = []
             document_category_ids = set()
-            total_chunks = len(chunks)
             uncategorized_chunks = 0
 
             allowed_by_id = {
@@ -1028,12 +1048,28 @@ def index_pdf(
                 task_manager.wait_for_pdf_permission()
 
                 chunk_number = chunk_index + 1
-                category = None
+
+                # IMPORTANT :
+                # Pendant l'appel de classification, on conserve le dernier
+                # pourcentage calculé après le chunk précédent.
+                # Le pourcentage ne progresse donc pas pendant qu'Ollama travaille.
+                update_indexing_progress(
+                    filename=requested_filename,
+                    progress=None,
+                    status="indexing",
+                    stage="categories",
+                    details=(
+                        f"Classification du chunk {chunk_number}/"
+                        f"{total_chunks} en cours..."
+                    ),
+                )
 
                 print(
                     "[Indexer] Classification du chunk "
                     f"{chunk_number}/{total_chunks}..."
                 )
+
+                category = None
 
                 try:
                     category = classify_chunk(
@@ -1078,18 +1114,22 @@ def index_pdf(
                         f"{chunk_number}/{total_chunks} → {category['name']}"
                     )
 
-                category_progress = 22 + int(
-                    chunk_number / total_chunks * 8
+                # Un chunk compte comme traité même si aucune catégorie
+                # valide n'a pu lui être attribuée.
+                # La progression est calculée uniquement à partir du nombre
+                # de chunks terminés, sans progression artificielle.
+                category_progress = int(
+                    chunk_number / total_chunks * 100
                 )
 
                 update_indexing_progress(
                     filename=requested_filename,
-                    progress=min(30, category_progress),
+                    progress=category_progress,
                     status="indexing",
                     stage="categories",
                     details=(
-                        "Classification des chunks : "
-                        f"{chunk_number}/{total_chunks} "
+                        f"Classification des chunks : "
+                        f"{chunk_number}/{total_chunks} terminés "
                         f"({uncategorized_chunks} sans catégorie)"
                     ),
                 )
@@ -1128,9 +1168,11 @@ def index_pdf(
             vectors = []
             total_texts = len(valid_texts)
 
+            # La classification est terminée : les étapes suivantes
+            # conservent le pourcentage atteint, sans le recalculer.
             update_indexing_progress(
                 filename=requested_filename,
-                progress=30,
+                progress=None,
                 status="indexing",
                 stage="embeddings",
                 details=f"Préparation des embeddings : 0/{total_texts}",
@@ -1171,15 +1213,9 @@ def index_pdf(
 
                 vectors.extend(batch_vectors)
 
-                embedding_progress = (
-                    30 + int(batch_end / total_texts * 40)
-                    if total_texts > 0
-                    else 30
-                )
-
                 update_indexing_progress(
                     filename=requested_filename,
-                    progress=min(70, embedding_progress),
+                    progress=None,
                     status="indexing",
                     stage="embeddings",
                     details=f"Embeddings : {batch_end}/{total_texts}",
@@ -1199,7 +1235,7 @@ def index_pdf(
 
             update_indexing_progress(
                 filename=requested_filename,
-                progress=70,
+                progress=None,
                 status="indexing",
                 stage="chroma",
                 details="Préparation de ChromaDB...",
@@ -1236,7 +1272,7 @@ def index_pdf(
 
             update_indexing_progress(
                 filename=requested_filename,
-                progress=85,
+                progress=None,
                 status="indexing",
                 stage="postgresql",
                 details="Enregistrement du document en base...",
@@ -1433,9 +1469,11 @@ def index_pdf(
                     canonical_filename=filename,
                 )
 
+            # La classification a déjà atteint 100 %.
+            # La fin de l'indexation ne recalcule pas ce pourcentage.
             update_indexing_progress(
                 filename=requested_filename,
-                progress=100,
+                progress=None,
                 status="completed",
                 stage="completed",
                 details=(
