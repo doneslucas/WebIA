@@ -31,10 +31,12 @@ class TaskManager:
             if self._pdf_indexing_active:
                 return False
 
-            # Réserve immédiatement le créneau pour refuser un second upload
-            # simultané, même si cette indexation doit attendre une autre tâche.
+            # Réserve le créneau et signale immédiatement l'attente
+            # aux tâches de fond pour qu'elles puissent libérer leur place.
             self._pdf_indexing_active = True
             self._waiting_pdf_operations += 1
+            self._condition.notify_all()
+
             try:
                 while (
                     self._active_user_requests > 0
@@ -45,10 +47,12 @@ class TaskManager:
 
                 self._active_pdf_operations += 1
                 return True
+
             except BaseException:
                 self._pdf_indexing_active = False
                 self._condition.notify_all()
                 raise
+
             finally:
                 self._waiting_pdf_operations -= 1
                 self._condition.notify_all()
@@ -57,8 +61,10 @@ class TaskManager:
         with self._condition:
             if self._pdf_indexing_active:
                 self._pdf_indexing_active = False
+
                 if self._active_pdf_operations > 0:
                     self._active_pdf_operations -= 1
+
             self._condition.notify_all()
 
     # Priorité 2 : suppressions et opérations PDF non-indexation
@@ -66,6 +72,11 @@ class TaskManager:
         """Réserve une opération PDF exclusive, sans chevauchement avec génération."""
         with self._condition:
             self._waiting_pdf_operations += 1
+
+            # Important : réveiller les tâches de fond déjà en attente
+            # pour qu'elles libèrent leur créneau.
+            self._condition.notify_all()
+
             try:
                 while (
                     self._active_user_requests > 0
@@ -74,7 +85,9 @@ class TaskManager:
                     or self._pdf_indexing_active
                 ):
                     self._condition.wait()
+
                 self._active_pdf_operations += 1
+
             finally:
                 self._waiting_pdf_operations -= 1
                 self._condition.notify_all()
@@ -83,6 +96,7 @@ class TaskManager:
         with self._condition:
             if self._active_pdf_operations > 0:
                 self._active_pdf_operations -= 1
+
             self._condition.notify_all()
 
     def wait_for_pdf_permission(self):
@@ -101,6 +115,7 @@ class TaskManager:
                 or self._waiting_pdf_operations > 0
             ):
                 self._condition.wait()
+
             self._active_background_operations += 1
             self._condition.notify_all()
 
@@ -108,33 +123,40 @@ class TaskManager:
         with self._condition:
             if self._active_background_operations > 0:
                 self._active_background_operations -= 1
+
             self._condition.notify_all()
 
     def wait_for_background_permission(self):
-        """Point de contrôle coopératif pour laisser passer les requêtes et opérations PDF."""
+        """Cède la priorité aux requêtes et aux opérations PDF en attente."""
         with self._condition:
             while self._active_user_requests > 0:
                 self._condition.wait()
 
-            # À la frontière entre deux lots, libère temporairement le créneau
-            # de fond si une opération PDF attend. Cela évite à la fois les
-            # accès concurrents à PostgreSQL/Chroma et un blocage mutuel.
             released_background_slot = False
-            if self._waiting_pdf_operations > 0 and self._active_background_operations > 0:
+
+            # Une tâche de fond suspend son créneau lorsqu'une opération
+            # PDF attend. Elle ne le récupère qu'après la fin de cette
+            # opération, à condition que l'indexation puisse avancer.
+            if (
+                self._waiting_pdf_operations > 0
+                and self._active_background_operations > 0
+            ):
                 self._active_background_operations -= 1
                 released_background_slot = True
                 self._condition.notify_all()
 
-            while (
-                self._active_user_requests > 0
-                or self._active_pdf_operations > 0
-                or self._waiting_pdf_operations > 0
-            ):
-                self._condition.wait()
+            try:
+                while (
+                    self._active_user_requests > 0
+                    or self._active_pdf_operations > 0
+                    or self._waiting_pdf_operations > 0
+                ):
+                    self._condition.wait()
 
-            if released_background_slot:
-                self._active_background_operations += 1
-                self._condition.notify_all()
+            finally:
+                if released_background_slot:
+                    self._active_background_operations += 1
+                    self._condition.notify_all()
 
     # État
     def has_active_user_request(self):
@@ -155,7 +177,9 @@ class TaskManager:
                 "active_user_requests": self._active_user_requests,
                 "active_pdf_operations": self._active_pdf_operations,
                 "active_pdf_indexing": self._pdf_indexing_active,
-                "active_background_operations": self._active_background_operations,
+                "active_background_operations": (
+                    self._active_background_operations
+                ),
                 "waiting_pdf_operations": self._waiting_pdf_operations,
                 "background_generation_paused": (
                     self._active_user_requests > 0

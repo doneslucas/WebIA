@@ -1,3 +1,4 @@
+
 import json
 import re
 from typing import Optional
@@ -8,6 +9,12 @@ from app.database.connection import get_connection
 from app.services.chroma import collection
 from app.services.categories import get_category_by_id
 from app.services.task_manager import task_manager
+
+
+class GenerationPaused(Exception):
+    """Signale une pause manuelle de la génération des questions."""
+
+    pass
 
 
 # ============================================================
@@ -630,8 +637,6 @@ def generate_quiz_batch(
         category_name if category_name else "Aucune catégorie spécifique"
     )
 
-    # Conserve une liste limitée pour éviter un prompt initial trop volumineux.
-    # Les questions rejetées seront ajoutées explicitement lors des relances.
     excluded_sample = sorted(excluded_questions)[:60]
 
     prompt = f"""
@@ -760,8 +765,6 @@ Consignes supplémentaires :
                         rejection_reasons.get(reason, 0) + 1
                     )
 
-                    # Transmet les questions effectivement rejetées
-                    # au prompt des tentatives suivantes.
                     rejected_questions.add(normalized)
                     continue
 
@@ -828,7 +831,6 @@ def save_questions(
 
     with get_connection() as conn:
         with conn.cursor() as cursor:
-            # Verrouille le chunk afin de limiter les dépassements concurrents.
             cursor.execute(
                 """
                 SELECT document_id, category_id, question_limit
@@ -846,7 +848,6 @@ def save_questions(
 
             document_id, category_id, configured_limit = chunk
 
-            # Un QCM de banque doit toujours hériter d'une vraie catégorie.
             if category_id is None:
                 raise ValueError(
                     f"Chunk {chunk_id} sans catégorie : "
@@ -873,8 +874,6 @@ def save_questions(
 
                 normalized = normalize_question(question["question"])
 
-                # Les doublons sont vérifiés à l'échelle du document,
-                # pas seulement dans la catégorie courante.
                 cursor.execute(
                     """
                     SELECT 1
@@ -952,7 +951,6 @@ def save_questions(
 
                 question_id = cursor.fetchone()[0]
 
-                # Le compteur est toujours recalculé depuis la table des questions.
                 cursor.execute(
                     """
                     UPDATE document_chunks
@@ -991,13 +989,17 @@ def generate_questions_for_bank(
     category_ids: Optional[list[int]] = None,
     progress_callback=None,
     continue_callback=None,
+    pause_callback=None,
 ):
     validate_difficulty(difficulty)
     category_ids = validate_category_ids(category_ids)
     document_ids = get_documents_scope(document)
     category_sql, category_params = get_category_filter_sql(category_ids)
 
-    # PostgreSQL reste la source de vérité au démarrage de chaque tâche.
+    def wait_for_manual_resume():
+        if pause_callback is not None:
+            pause_callback()
+
     with get_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -1035,6 +1037,9 @@ def generate_questions_for_bank(
     failed_chunks = set()
 
     while generated_count < target_count:
+        wait_for_manual_resume()
+        task_manager.wait_for_background_permission()
+
         chunks = get_available_chunks(
             document=document,
             difficulty=difficulty,
@@ -1048,6 +1053,7 @@ def generate_questions_for_bank(
         attempted_in_pass = 0
 
         for chunk in chunks:
+            wait_for_manual_resume()
             task_manager.wait_for_background_permission()
 
             if continue_callback is not None and not continue_callback():
@@ -1105,11 +1111,11 @@ def generate_questions_for_bank(
                     )
                     continue
 
-                # Exclut les questions de tout le document, toutes catégories confondues.
                 excluded_questions = build_excluded_questions(
                     document=document,
                 )
 
+                wait_for_manual_resume()
                 task_manager.wait_for_background_permission()
 
                 questions = generate_quiz_batch(
@@ -1120,6 +1126,9 @@ def generate_questions_for_bank(
                     batch_size=batch_size,
                 )
 
+                # Si la pause est demandée pendant l'appel au LLM,
+                # le lot reste en mémoire jusqu'à la reprise.
+                wait_for_manual_resume()
                 task_manager.wait_for_background_permission()
 
                 if continue_callback is not None and not continue_callback():
@@ -1137,8 +1146,6 @@ def generate_questions_for_bank(
                 )
 
                 if saved_questions:
-                    # Recompte après insertion, sans supposer que toutes les
-                    # questions proposées ont effectivement été enregistrées.
                     generated_count = count_questions(
                         difficulty=difficulty,
                         category_ids=category_ids,
@@ -1163,6 +1170,11 @@ def generate_questions_for_bank(
                         f"Chunk {chunk_id} ignoré : aucune question sauvegardée "
                         "(doublons ou limite atteinte)."
                     )
+
+            except GenerationPaused:
+                # Une pause n'est pas un échec du chunk.
+                # L'exception doit remonter au gestionnaire de tâches.
+                raise
 
             except Exception as error:
                 failed_chunks.add(chunk_id)
@@ -1207,7 +1219,6 @@ def generate_questions_for_bank(
     )
 
     return generated_count
-
 
 # ============================================================
 # QUESTIONS DÉJÀ VUES PAR UN UTILISATEUR

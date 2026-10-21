@@ -24,6 +24,7 @@ from app.services.indexer import (
 )
 
 from app.services.task_manager import task_manager
+from app.services.question_bank_manager import question_bank_manager
 
 
 router = APIRouter(
@@ -48,6 +49,21 @@ def verify_admin(payload: dict):
         )
 
 
+def get_document_progress_with_pause(filename: str) -> dict:
+    """Ajoute l'état de pause sans modifier l'indexation."""
+    progress = dict(get_generation_progress(filename))
+    pause_state = question_bank_manager.get_document_pause_status(filename)
+    progress.update(pause_state)
+
+    if pause_state.get("generation_paused"):
+        progress["status"] = pause_state.get(
+            "pause_status",
+            "paused",
+        )
+
+    return progress
+
+
 @router.get("")
 def list_documents(payload: dict = Depends(verify_token)):
     try:
@@ -62,24 +78,31 @@ def list_documents(payload: dict = Depends(verify_token)):
                 continue
 
             try:
-                progress = get_generation_progress(filename)
+                progress = get_document_progress_with_pause(filename)
 
-                if isinstance(progress, dict):
-                    document = {
-                        **document,
-                        "processing_status": progress.get(
-                            "status",
-                            "not_started",
-                        ),
-                        "global_progress": progress.get(
-                            "global_progress",
-                            0,
-                        ),
-                        "indexing_progress": progress.get(
-                            "indexing_progress",
-                            0,
-                        ),
-                    }
+                document = {
+                    **document,
+                    "processing_status": progress.get(
+                        "status",
+                        "not_started",
+                    ),
+                    "global_progress": progress.get(
+                        "global_progress",
+                        0,
+                    ),
+                    "indexing_progress": progress.get(
+                        "indexing_progress",
+                        0,
+                    ),
+                    "generation_paused": progress.get(
+                        "generation_paused",
+                        False,
+                    ),
+                    "pause_status": progress.get(
+                        "pause_status",
+                        None,
+                    ),
+                }
 
             except Exception as progress_error:
                 print(
@@ -92,6 +115,8 @@ def list_documents(payload: dict = Depends(verify_token)):
                     "processing_status": "not_started",
                     "global_progress": 0,
                     "indexing_progress": 0,
+                    "generation_paused": False,
+                    "pause_status": None,
                 }
 
             enriched_documents.append(document)
@@ -124,7 +149,7 @@ def document_progress(
         )
 
     try:
-        return get_generation_progress(filename)
+        return get_document_progress_with_pause(filename)
 
     except Exception as error:
         print(
@@ -134,9 +159,7 @@ def document_progress(
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Impossible de récupérer la progression de génération."
-            ),
+            detail="Impossible de récupérer la progression de génération.",
         )
 
 
@@ -161,7 +184,7 @@ async def document_progress_stream(
         try:
             while True:
                 progress = await run_in_threadpool(
-                    get_generation_progress,
+                    get_document_progress_with_pause,
                     filename,
                 )
 
@@ -177,25 +200,42 @@ async def document_progress_stream(
                         f"data: {serialized}\n\n"
                     )
                     previous_payload = serialized
-                    last_keepalive = (
-                        asyncio.get_running_loop().time()
-                    )
+                    last_keepalive = asyncio.get_running_loop().time()
 
                 status = progress.get("status")
+                pause_status = progress.get("pause_status")
+                generation_paused = progress.get(
+                    "generation_paused",
+                    False,
+                )
 
-                # Une indexation peut passer brièvement par completed
-                # avant que la génération manuelle soit mise en attente.
-                # On attend donc plusieurs lectures avant de fermer le flux.
-                if status == "completed":
+                if generation_paused or pause_status in {
+                    "pausing",
+                    "paused",
+                }:
+                    completed_observations = 0
+                elif status == "completed":
                     completed_observations += 1
                 else:
                     completed_observations = 0
 
-                if status in {"waiting_manual", "error"}:
+                if status == "error":
                     yield "event: end\ndata: {}\n\n"
                     break
 
-                if completed_observations >= 3:
+                if (
+                    not generation_paused
+                    and pause_status not in {"pausing", "paused"}
+                    and status == "waiting_manual"
+                ):
+                    yield "event: end\ndata: {}\n\n"
+                    break
+
+                if (
+                    not generation_paused
+                    and pause_status not in {"pausing", "paused"}
+                    and completed_observations >= 3
+                ):
                     yield "event: end\ndata: {}\n\n"
                     break
 
@@ -208,7 +248,6 @@ async def document_progress_stream(
                 await asyncio.sleep(0.5)
 
         except asyncio.CancelledError:
-            # Le navigateur a fermé le flux SSE.
             raise
 
     return StreamingResponse(
@@ -365,7 +404,10 @@ def generate_document_questions(
             enqueue=True,
         )
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
     except Exception as error:
         print(
             f"[Documents] Impossible de lancer la génération pour "
@@ -391,6 +433,72 @@ def generate_document_questions(
     }
 
 
+@router.post("/{filename}/pause-questions")
+def pause_document_questions(
+    filename: str,
+    payload: dict = Depends(verify_token),
+):
+    """Demande la pause de la génération, sans interrompre l'indexation."""
+    verify_admin(payload)
+    filename = Path(filename).name
+
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Seuls les fichiers PDF peuvent être traités.",
+        )
+
+    result = question_bank_manager.pause_document_tasks(filename)
+
+    if not result.get("accepted"):
+        raise HTTPException(
+            status_code=409,
+            detail="Aucune génération active ou en attente pour ce document.",
+        )
+
+    progress = get_document_progress_with_pause(filename)
+
+    return {
+        "message": (
+            "Pause demandée. Le lot en cours sera terminé jusqu'au prochain "
+            "point sûr avant l'arrêt de la génération."
+            if result["status"] == "pausing"
+            else "La génération des questions est en pause."
+        ),
+        "filename": filename,
+        **progress,
+    }
+
+
+@router.post("/{filename}/resume-questions")
+def resume_document_questions(
+    filename: str,
+    payload: dict = Depends(verify_token),
+):
+    """Reprend la génération existante sans réinitialiser les questions."""
+    verify_admin(payload)
+    filename = Path(filename).name
+
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Seuls les fichiers PDF peuvent être traités.",
+        )
+
+    result = question_bank_manager.resume_document_tasks(filename)
+    progress = get_document_progress_with_pause(filename)
+
+    return {
+        "message": (
+            "La génération des questions reprend."
+            if result.get("resumed")
+            else "La génération n'était pas en pause."
+        ),
+        "filename": filename,
+        **progress,
+    }
+
+
 @router.delete("/{filename}")
 def remove_document(
     filename: str,
@@ -409,8 +517,6 @@ def remove_document(
     task_manager.start_pdf_operation()
 
     try:
-        from app.services.question_bank_manager import question_bank_manager
-
         question_bank_manager.cancel_document_tasks(filename)
 
         result = delete_document(
