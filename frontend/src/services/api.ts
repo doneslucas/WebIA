@@ -1,3 +1,4 @@
+
 const API_URL = "http://127.0.0.1:8000";
 
 
@@ -172,7 +173,6 @@ export async function streamDocumentProgress<T>(
         buffer += decoder.decode();
       }
 
-      // Les événements SSE se terminent par une ligne vide.
       const normalizedBuffer = buffer.replace(/\r\n/g, "\n");
       const events = normalizedBuffer.split("\n\n");
 
@@ -271,6 +271,10 @@ export async function chat(question: string) {
 }
 
 
+/**
+ * Importe un PDF.
+ * Le backend réserve cette action aux administrateurs.
+ */
 export async function uploadDocument(file: File) {
   const formData = new FormData();
   formData.append("file", file);
@@ -289,6 +293,9 @@ export async function uploadDocument(file: File) {
 }
 
 
+/**
+ * Récupère la liste des documents accessibles aux utilisateurs connectés.
+ */
 export async function getDocuments() {
   const response = await authenticatedFetch(`${API_URL}/documents`, {
     method: "GET",
@@ -300,6 +307,31 @@ export async function getDocuments() {
 }
 
 
+/**
+ * Récupère le PDF original avec authentification.
+ * Le composant peut ensuite l'afficher dans un nouvel onglet
+ * à partir d'une URL Blob temporaire.
+ *
+ * Le backend autorise la consultation aux utilisateurs connectés,
+ * sans leur accorder de droits de gestion du document.
+ */
+export async function getDocumentPdf(filename: string): Promise<Response> {
+  return authenticatedFetch(
+    `${API_URL}/documents/${encodeURIComponent(filename)}/view`,
+    {
+      method: "GET",
+      headers: {
+        Accept: "application/pdf",
+      },
+    },
+  );
+}
+
+
+/**
+ * Supprime un PDF.
+ * Le backend réserve cette action aux administrateurs.
+ */
 export async function deleteDocument(filename: string) {
   const response = await authenticatedFetch(
     `${API_URL}/documents/${encodeURIComponent(filename)}`,
@@ -314,6 +346,10 @@ export async function deleteDocument(filename: string) {
 }
 
 
+/**
+ * Lance la génération des questions.
+ * Le backend réserve cette action aux administrateurs.
+ */
 export async function generateDocumentQuestions(filename: string) {
   const response = await authenticatedFetch(
     `${API_URL}/documents/${encodeURIComponent(filename)}/generate-questions`,

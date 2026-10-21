@@ -12,10 +12,12 @@ import type {
 import {
   uploadDocument,
   getDocuments,
+  getDocumentPdf,
   deleteDocument,
   getGenerationProgress,
   generateDocumentQuestions,
   streamDocumentProgress,
+  getProfile,
 } from "../services/api";
 
 import "./DocumentUpload.css";
@@ -68,8 +70,6 @@ const ACTIVE_DOCUMENT_KEY = "webia_active_document";
 const ACTIVE_PROGRESS_KEY = "webia_active_document_progress";
 const API_URL = "http://127.0.0.1:8000";
 
-type GenerationControlAction = "pause" | "resume";
-
 const ACTIVE_PROCESSING_STATUSES = [
   "pending",
   "indexing",
@@ -79,14 +79,14 @@ const ACTIVE_PROCESSING_STATUSES = [
   "pausing",
 ];
 
+type GenerationControlAction = "pause" | "resume";
+
 async function sendGenerationControl(
   filename: string,
   action: GenerationControlAction,
 ) {
   const endpoint =
-    action === "pause"
-      ? "pause-questions"
-      : "resume-questions";
+    action === "pause" ? "pause-questions" : "resume-questions";
 
   const url =
     `${API_URL}/documents/${encodeURIComponent(filename)}/${endpoint}`;
@@ -160,13 +160,150 @@ async function sendGenerationControl(
   };
 }
 
+function getProgressPercentage(
+  progress: DifficultyProgress | undefined,
+): number {
+  if (!progress) {
+    return 0;
+  }
+
+  const current = Math.max(0, Number(progress.current) || 0);
+  const target = Math.max(0, Number(progress.target) || 0);
+
+  if (target === 0) {
+    return progress.status === "completed" ? 100 : 0;
+  }
+
+  const calculatedProgress = Number.isFinite(progress.progress)
+    ? progress.progress
+    : (current / target) * 100;
+
+  return Math.min(
+    100,
+    Math.max(0, Math.floor(calculatedProgress)),
+  );
+}
+
+function DifficultyProgressBar({
+  label,
+  progress,
+  color,
+}: {
+  label: string;
+  progress: DifficultyProgress | undefined;
+  color: string;
+}) {
+  const current = Math.max(0, Number(progress?.current) || 0);
+  const target = Math.max(0, Number(progress?.target) || 0);
+  const percentage = getProgressPercentage(progress);
+  const isPaused = progress?.status === "paused";
+  const isError = progress?.status === "error";
+
+  return (
+    <div
+      style={{
+        minWidth: 0,
+        padding: "10px",
+        border: "1px solid var(--border-color, #e5e7eb)",
+        borderRadius: "10px",
+        background: "var(--card-background, rgba(128,128,128,0.04))",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "5px",
+          marginBottom: "8px",
+        }}
+      >
+        <span
+          style={{
+            fontSize: "12px",
+            fontWeight: 600,
+            lineHeight: 1.3,
+            overflowWrap: "anywhere",
+          }}
+        >
+          {label}
+        </span>
+
+        <span
+          style={{
+            fontSize: "12px",
+            fontWeight: 700,
+            color: isError ? "#dc2626" : color,
+            flexShrink: 0,
+          }}
+        >
+          {percentage}%
+        </span>
+      </div>
+
+      <div
+        role="progressbar"
+        aria-label={`Progression des questions ${label.toLowerCase()}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percentage}
+        style={{
+          width: "100%",
+          height: "6px",
+          overflow: "hidden",
+          borderRadius: "999px",
+          background: "var(--progress-track, #e5e7eb)",
+        }}
+      >
+        <div
+          style={{
+            width: `${percentage}%`,
+            height: "100%",
+            borderRadius: "999px",
+            background: isError ? "#dc2626" : color,
+            transition: "width 300ms ease",
+          }}
+        />
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "4px",
+          marginTop: "7px",
+          fontSize: "11px",
+          color: "var(--secondary-text, #6b7280)",
+        }}
+      >
+        <span>
+          {current} / {target}
+        </span>
+
+        {isPaused && <span style={{ fontWeight: 600 }}>En pause</span>}
+        {isError && <span style={{ fontWeight: 600 }}>Erreur</span>}
+
+        {progress?.status === "completed" && (
+          <span style={{ fontWeight: 600 }}>Terminé</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DocumentUpload() {
   const [message, setMessage] = useState("");
+  const [viewerMessage, setViewerMessage] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [roleLoading, setRoleLoading] = useState(true);
+
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [loadingDocuments, setLoadingDocuments] = useState(true);
   const [deletingFiles, setDeletingFiles] = useState<string[]>([]);
+  const [viewingFiles, setViewingFiles] = useState<string[]>([]);
   const [generationControlFiles, setGenerationControlFiles] =
     useState<string[]>([]);
   const [externalUploadInProgress, setExternalUploadInProgress] =
@@ -178,6 +315,51 @@ function DocumentUpload() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamControllerRef = useRef<AbortController | null>(null);
   const streamFilenameRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadUserRole() {
+      try {
+        const { response, data } = await getProfile();
+
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        const role =
+          data?.role ??
+          data?.user?.role ??
+          data?.profile?.role;
+
+        if (!cancelled) {
+          setIsAdmin(
+            typeof role === "string" &&
+              role.trim().toLowerCase() === "admin",
+          );
+        }
+      } catch (error) {
+        console.error(
+          "Impossible de récupérer le rôle de l'utilisateur :",
+          error,
+        );
+
+        if (!cancelled) {
+          setIsAdmin(false);
+        }
+      } finally {
+        if (!cancelled) {
+          setRoleLoading(false);
+        }
+      }
+    }
+
+    void loadUserRole();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function stopProgressStream() {
     if (streamControllerRef.current) {
@@ -217,9 +399,7 @@ function DocumentUpload() {
 
   function loadSavedProgress(): GenerationProgress | null {
     try {
-      const savedProgress = localStorage.getItem(
-        ACTIVE_PROGRESS_KEY,
-      );
+      const savedProgress = localStorage.getItem(ACTIVE_PROGRESS_KEY);
 
       if (!savedProgress) {
         return null;
@@ -258,9 +438,7 @@ function DocumentUpload() {
     );
   }
 
-  function isGenerationPaused(
-    progress: GenerationProgress | null,
-  ) {
+  function isGenerationPaused(progress: GenerationProgress | null) {
     return (
       progress !== null &&
       (
@@ -271,8 +449,6 @@ function DocumentUpload() {
     );
   }
 
-  // Une génération en pause n'est pas une indexation active.
-  // Une ancienne clé localStorage ne suffit pas à bloquer l'import.
   function isDocumentProcessing() {
     if (uploading) {
       return true;
@@ -282,16 +458,7 @@ function DocumentUpload() {
       return false;
     }
 
-    if (externalUploadInProgress) {
-      return true;
-    }
-
-    return (
-      generationProgress !== null &&
-      ACTIVE_PROCESSING_STATUSES.includes(
-        generationProgress.status,
-      )
-    );
+    return externalUploadInProgress;
   }
 
   function showProcessingMessage() {
@@ -303,6 +470,10 @@ function DocumentUpload() {
   }
 
   function openFilePicker() {
+    if (!isAdmin || roleLoading) {
+      return;
+    }
+
     if (isDocumentProcessing()) {
       showProcessingMessage();
       return;
@@ -315,36 +486,26 @@ function DocumentUpload() {
     switch (status) {
       case "pending":
         return "En attente";
-
       case "indexing":
         return "Indexation en cours";
-
       case "generating":
       case "running":
         return "Génération des questions";
-
       case "queued":
         return "Génération en attente";
-
       case "pausing":
         return "Pause demandée";
-
       case "paused":
         return "Génération en pause";
-
       case "waiting_manual":
         return "Prêt — génération manuelle";
-
       case "completed":
         return "Disponible";
-
       case "error":
         return "Erreur";
-
       case "not_started":
       case undefined:
         return "En attente";
-
       default:
         return status;
     }
@@ -354,36 +515,26 @@ function DocumentUpload() {
     switch (document.processing_status) {
       case "pending":
         return "Le traitement va commencer.";
-
       case "indexing":
         return "Le document est en cours d’indexation.";
-
       case "generating":
       case "running":
         return "Les questions sont en cours de génération.";
-
       case "queued":
         return "La génération des questions est dans la file d’attente.";
-
       case "pausing":
         return "La pause sera effective à la fin du lot en cours.";
-
       case "paused":
         return "La génération est en pause. Les questions déjà enregistrées sont conservées.";
-
       case "waiting_manual":
         return "Document indexé. Les questions seront créées uniquement sur demande.";
-
       case "completed":
         return "Document prêt à être utilisé.";
-
       case "error":
         return "Une erreur est survenue pendant le traitement.";
-
       case "not_started":
       case undefined:
         return "En attente du traitement.";
-
       default:
         return "Traitement du document en cours.";
     }
@@ -393,26 +544,19 @@ function DocumentUpload() {
     switch (status) {
       case "pending":
         return "generation-status-pending";
-
       case "indexing":
         return "generation-status-indexing";
-
       case "generating":
       case "running":
       case "queued":
       case "pausing":
         return "generation-status-generating";
-
       case "paused":
-        return "generation-status-completed";
-
       case "completed":
       case "waiting_manual":
         return "generation-status-completed";
-
       case "error":
         return "generation-status-error";
-
       default:
         return "generation-status-pending";
     }
@@ -487,21 +631,17 @@ function DocumentUpload() {
     stopProgressStream();
 
     const controller = new AbortController();
-
     streamControllerRef.current = controller;
     streamFilenameRef.current = filename;
-
     saveActiveDocument(filename);
 
     try {
       await streamDocumentProgress<GenerationProgress>(
         filename,
         (progress) => {
-          if (controller.signal.aborted) {
-            return;
+          if (!controller.signal.aborted) {
+            handleProgressUpdate(progress);
           }
-
-          handleProgressUpdate(progress);
         },
         controller.signal,
       );
@@ -542,8 +682,7 @@ function DocumentUpload() {
 
       if (!response.ok) {
         throw new Error(
-          data.detail ||
-            "Impossible de récupérer les documents.",
+          data.detail || "Impossible de récupérer les documents.",
         );
       }
 
@@ -554,17 +693,19 @@ function DocumentUpload() {
       }
 
       setDocuments(data.documents);
+      setViewerMessage("");
     } catch (error) {
       console.error(
         "Erreur lors du chargement des documents :",
         error,
       );
 
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Impossible de récupérer les documents.",
-      );
+      const errorMessage = error instanceof Error
+        ? error.message
+        : "Impossible de récupérer les documents.";
+
+      setMessage(errorMessage);
+      setViewerMessage(errorMessage);
     } finally {
       setLoadingDocuments(false);
     }
@@ -582,9 +723,7 @@ function DocumentUpload() {
     }
 
     async function restoreActiveDocument() {
-      const activeDocument = localStorage.getItem(
-        ACTIVE_DOCUMENT_KEY,
-      );
+      const activeDocument = localStorage.getItem(ACTIVE_DOCUMENT_KEY);
 
       if (!activeDocument) {
         if (mounted) {
@@ -594,8 +733,6 @@ function DocumentUpload() {
       }
 
       try {
-        // On vérifie l'état réel du backend avant de verrouiller
-        // à nouveau l'interface après un redémarrage.
         const { response, data } =
           await getGenerationProgress(activeDocument);
 
@@ -621,16 +758,12 @@ function DocumentUpload() {
           return;
         }
 
-        if (
-          ACTIVE_PROCESSING_STATUSES.includes(progress.status)
-        ) {
+        if (ACTIVE_PROCESSING_STATUSES.includes(progress.status)) {
           setExternalUploadInProgress(true);
           void startProgressStream(activeDocument);
           return;
         }
 
-        // Le backend confirme qu'il n'y a pas de traitement actif.
-        // On retire uniquement le verrou du navigateur, pas la progression.
         setExternalUploadInProgress(false);
         clearActiveDocument();
       } catch (error) {
@@ -643,14 +776,57 @@ function DocumentUpload() {
           error,
         );
 
-        // Une ancienne clé ne doit pas bloquer indéfiniment
-        // l'interface lorsque le statut ne peut pas être récupéré.
         setExternalUploadInProgress(false);
         clearActiveDocument();
       }
     }
 
-    void restoreActiveDocument();
+    async function restoreSpecificDocument(filename: string) {
+      try {
+        const { response, data } =
+          await getGenerationProgress(filename);
+
+        if (!mounted) {
+          return;
+        }
+
+        if (!response.ok) {
+          setExternalUploadInProgress(false);
+          clearActiveDocument();
+          return;
+        }
+
+        const progress = data as GenerationProgress;
+
+        setGenerationProgress(progress);
+        saveProgress(progress);
+        updateDocumentProgress(progress);
+
+        if (isGenerationPaused(progress)) {
+          setExternalUploadInProgress(false);
+          clearActiveDocument();
+          return;
+        }
+
+        if (ACTIVE_PROCESSING_STATUSES.includes(progress.status)) {
+          setExternalUploadInProgress(true);
+          void startProgressStream(filename);
+        } else {
+          setExternalUploadInProgress(false);
+          clearActiveDocument();
+        }
+      } catch (error) {
+        console.error(
+          `Impossible de vérifier ${filename} :`,
+          error,
+        );
+
+        if (mounted) {
+          setExternalUploadInProgress(false);
+          clearActiveDocument();
+        }
+      }
+    }
 
     function handleStorageChange(event: StorageEvent) {
       if (event.key === ACTIVE_DOCUMENT_KEY) {
@@ -685,70 +861,105 @@ function DocumentUpload() {
       }
     }
 
-    async function restoreSpecificDocument(filename: string) {
-      try {
-        const { response, data } =
-          await getGenerationProgress(filename);
-
-        if (!mounted) {
-          return;
-        }
-
-        if (!response.ok) {
-          setExternalUploadInProgress(false);
-          clearActiveDocument();
-          return;
-        }
-
-        const progress = data as GenerationProgress;
-
-        setGenerationProgress(progress);
-        saveProgress(progress);
-        updateDocumentProgress(progress);
-
-        if (isGenerationPaused(progress)) {
-          setExternalUploadInProgress(false);
-          clearActiveDocument();
-          return;
-        }
-
-        if (
-          ACTIVE_PROCESSING_STATUSES.includes(progress.status)
-        ) {
-          setExternalUploadInProgress(true);
-          void startProgressStream(filename);
-        } else {
-          setExternalUploadInProgress(false);
-          clearActiveDocument();
-        }
-      } catch (error) {
-        console.error(
-          `Impossible de vérifier ${filename} :`,
-          error,
-        );
-
-        if (mounted) {
-          setExternalUploadInProgress(false);
-          clearActiveDocument();
-        }
-      }
-    }
+    void restoreActiveDocument();
 
     window.addEventListener("storage", handleStorageChange);
 
     return () => {
       mounted = false;
 
-      window.removeEventListener(
-        "storage",
-        handleStorageChange,
-      );
-
+      window.removeEventListener("storage", handleStorageChange);
       stopProgressStream();
     };
   }, []);
 
+  async function handleViewPdf(filename: string) {
+    setViewerMessage("");
+
+    const previewWindow = window.open("", "_blank");
+
+    if (!previewWindow) {
+      const errorMessage =
+        "Le navigateur a bloqué l’ouverture du PDF. Autorisez les fenêtres contextuelles puis réessayez.";
+
+      if (isAdmin) {
+        setMessage(errorMessage);
+      } else {
+        setViewerMessage(errorMessage);
+      }
+
+      return;
+    }
+
+    previewWindow.document.title = `Chargement de ${filename}`;
+    previewWindow.document.body.innerHTML = "";
+    previewWindow.document.body.style.fontFamily = "sans-serif";
+    previewWindow.document.body.style.padding = "24px";
+    previewWindow.document.body.textContent =
+      `Chargement du PDF « ${filename} »...`;
+
+    setViewingFiles((current) =>
+      current.includes(filename) ? current : [...current, filename],
+    );
+
+    try {
+      const response = await getDocumentPdf(filename);
+
+      if (!response.ok) {
+        let errorMessage = "Impossible d’ouvrir ce PDF.";
+
+        try {
+          const data = await response.json();
+          errorMessage = data.detail || errorMessage;
+        } catch {
+          // Le serveur n'a pas nécessairement renvoyé du JSON.
+        }
+
+        throw new Error(errorMessage);
+      }
+
+      const blob = await response.blob();
+
+      if (blob.size === 0) {
+        throw new Error("Le fichier PDF reçu est vide.");
+      }
+
+      const pdfUrl = URL.createObjectURL(
+        new Blob([blob], { type: "application/pdf" }),
+      );
+
+      previewWindow.addEventListener(
+        "beforeunload",
+        () => URL.revokeObjectURL(pdfUrl),
+        { once: true },
+      );
+
+      previewWindow.location.replace(pdfUrl);
+    } catch (error) {
+      previewWindow.close();
+
+      const errorMessage = error instanceof Error
+        ? error.message
+        : `Impossible d’ouvrir ${filename}.`;
+
+      if (isAdmin) {
+        setMessage(errorMessage);
+      } else {
+        setViewerMessage(errorMessage);
+      }
+    } finally {
+      setViewingFiles((current) =>
+        current.filter((file) => file !== filename),
+      );
+    }
+  }
+
   async function processFile(file: File) {
+    if (!isAdmin || roleLoading) {
+      setMessage("Seuls les administrateurs peuvent importer des documents.");
+      return;
+    }
+
     if (!file) {
       return;
     }
@@ -775,18 +986,13 @@ function DocumentUpload() {
 
     stopProgressStream();
     saveActiveDocument(filename);
-
-    // Le flux suit l'indexation dès que le serveur expose sa progression.
     void startProgressStream(filename);
 
     try {
       const { response, data } = await uploadDocument(file);
 
       if (response.ok) {
-        const returnedFilename =
-          data.file ||
-          data.filename ||
-          filename;
+        const returnedFilename = data.file || data.filename || filename;
 
         if (returnedFilename !== filename) {
           stopProgressStream();
@@ -806,30 +1012,21 @@ function DocumentUpload() {
 
         const latestProgress = loadSavedProgress();
 
-        if (
-          latestProgress &&
-          latestProgress.document === returnedFilename
-        ) {
+        if (latestProgress?.document === returnedFilename) {
           setGenerationProgress(latestProgress);
         }
       } else {
         stopProgressStream();
         removeActiveDocument();
-
         setExternalUploadInProgress(false);
         setGenerationProgress(null);
-
-        setMessage(
-          data.detail ||
-            "Une erreur est survenue pendant l’import.",
-        );
+        setMessage(data.detail || "Une erreur est survenue pendant l’import.");
       }
     } catch (error) {
       console.error("Erreur lors de l’upload :", error);
 
       stopProgressStream();
       removeActiveDocument();
-
       setExternalUploadInProgress(false);
       setGenerationProgress(null);
 
@@ -858,7 +1055,10 @@ function DocumentUpload() {
 
   function handleDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
-    setDragging(!isDocumentProcessing());
+
+    if (isAdmin && !roleLoading) {
+      setDragging(!isDocumentProcessing());
+    }
   }
 
   function handleDragLeave(event: DragEvent<HTMLDivElement>) {
@@ -869,6 +1069,10 @@ function DocumentUpload() {
   async function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setDragging(false);
+
+    if (!isAdmin || roleLoading) {
+      return;
+    }
 
     if (isDocumentProcessing()) {
       showProcessingMessage();
@@ -883,6 +1087,11 @@ function DocumentUpload() {
   }
 
   async function handleGenerateQuestions(filename: string) {
+    if (!isAdmin || roleLoading) {
+      setMessage("Seuls les administrateurs peuvent générer des questions.");
+      return;
+    }
+
     if (isDocumentProcessing()) {
       showProcessingMessage();
       return;
@@ -909,8 +1118,7 @@ function DocumentUpload() {
 
       if (!response.ok) {
         throw new Error(
-          data.detail ||
-            "Impossible de lancer la génération des questions.",
+          data.detail || "Impossible de lancer la génération des questions.",
         );
       }
 
@@ -938,10 +1146,13 @@ function DocumentUpload() {
     filename: string,
     action: GenerationControlAction,
   ) {
+    if (!isAdmin || roleLoading) {
+      setMessage("Seuls les administrateurs peuvent contrôler la génération.");
+      return;
+    }
+
     setGenerationControlFiles((current) =>
-      current.includes(filename)
-        ? current
-        : [...current, filename],
+      current.includes(filename) ? current : [...current, filename],
     );
 
     try {
@@ -981,7 +1192,6 @@ function DocumentUpload() {
         clearActiveDocument();
         stopProgressStream();
       } else {
-        // La pause est demandée, mais le lot actuel peut encore finir.
         setMessage(
           data.message ||
             `Pause demandée pour ${filename}. Le lot en cours doit se terminer.`,
@@ -1003,6 +1213,11 @@ function DocumentUpload() {
   }
 
   async function handleDelete(filename: string) {
+    if (!isAdmin || roleLoading) {
+      setMessage("Seuls les administrateurs peuvent supprimer des documents.");
+      return;
+    }
+
     const confirmed = window.confirm(
       `Voulez-vous vraiment supprimer "${filename}" ?\n\n` +
         "Cette action supprimera définitivement le document.",
@@ -1013,9 +1228,7 @@ function DocumentUpload() {
     }
 
     setDeletingFiles((current) =>
-      current.includes(filename)
-        ? current
-        : [...current, filename],
+      current.includes(filename) ? current : [...current, filename],
     );
 
     setMessage(`Suppression de ${filename} en cours...`);
@@ -1025,24 +1238,18 @@ function DocumentUpload() {
 
       if (!response.ok) {
         throw new Error(
-          data.detail ||
-            "Impossible de supprimer le document.",
+          data.detail || "Impossible de supprimer le document.",
         );
       }
 
       if (generationProgress?.document === filename) {
         stopProgressStream();
         removeActiveDocument();
-
         setExternalUploadInProgress(false);
         setGenerationProgress(null);
       }
 
-      setMessage(
-        data.message ||
-          `${filename} supprimé avec succès.`,
-      );
-
+      setMessage(data.message || `${filename} supprimé avec succès.`);
       await loadDocuments();
     } catch (error) {
       console.error("Erreur lors de la suppression :", error);
@@ -1062,6 +1269,8 @@ function DocumentUpload() {
   const documentProcessing = isDocumentProcessing();
 
   const indexingIsActive =
+    isAdmin &&
+    !roleLoading &&
     generationProgress !== null &&
     generationProgress.indexing?.status === "indexing" &&
     generationProgress.indexing?.stage === "categories" &&
@@ -1087,74 +1296,81 @@ function DocumentUpload() {
     generationProgress?.indexing?.details ||
     "Préparation de la classification...";
 
+  const viewerMode = !isAdmin || roleLoading;
+
   return (
-    <div className="document-upload">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".pdf,application/pdf"
-        onChange={handleFileChange}
-        style={{ display: "none" }}
-      />
+    <div
+      className={`document-upload ${
+        viewerMode ? "document-upload-viewer" : "document-upload-admin"
+      }`}
+    >
+      {isAdmin && !roleLoading && (
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf,application/pdf"
+          onChange={handleFileChange}
+          style={{ display: "none" }}
+        />
+      )}
 
-      <div
-        className={`document-dropzone ${
-          dragging ? "document-dropzone-dragging" : ""
-        } ${
-          documentProcessing ? "document-dropzone-loading" : ""
-        }`}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-      >
-        <div className="document-dropzone-icon">📄</div>
-
-        <h3>
-          {documentProcessing
-            ? "Importation en cours..."
-            : dragging
-              ? "Déposez votre PDF ici"
-              : "Ajoutez un document PDF"}
-        </h3>
-
-        <p
-          style={{
-            color: documentProcessing ? "#888888" : undefined,
-          }}
+      {isAdmin && !roleLoading && (
+        <div
+          className={`document-dropzone ${
+            dragging ? "document-dropzone-dragging" : ""
+          } ${documentProcessing ? "document-dropzone-loading" : ""}`}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
         >
-          {documentProcessing
-            ? "Impossible d’importer un autre document : un document est en cours d’importation ou d’indexation."
-            : "Glissez-déposez votre PDF dans cette zone"}
-        </p>
+          <div className="document-dropzone-icon">📄</div>
 
-        {!documentProcessing && (
-          <span className="document-dropzone-or">ou</span>
-        )}
+          <h3>
+            {documentProcessing
+              ? "Importation en cours..."
+              : dragging
+                ? "Déposez votre PDF ici"
+                : "Ajoutez un document PDF"}
+          </h3>
 
-        <button
-          type="button"
-          className="document-upload-button"
-          onClick={openFilePicker}
-          disabled={documentProcessing}
-          style={
-            documentProcessing
-              ? {
-                  opacity: 0.5,
-                  cursor: "not-allowed",
-                }
-              : undefined
-          }
-        >
-          {documentProcessing
-            ? "Importation en cours..."
-            : "📄 Ajouter un PDF"}
-        </button>
-      </div>
+          <p
+            style={{
+              color: documentProcessing ? "#888888" : undefined,
+            }}
+          >
+            {documentProcessing
+              ? "Impossible d’importer un autre document : un document est en cours d’importation ou d’indexation."
+              : "Glissez-déposez votre PDF dans cette zone"}
+          </p>
 
-      {message && (
-        <p className="document-upload-message">
-          {message}
-        </p>
+          {!documentProcessing && (
+            <span className="document-dropzone-or">ou</span>
+          )}
+
+          <button
+            type="button"
+            className="document-upload-button"
+            onClick={openFilePicker}
+            disabled={documentProcessing}
+            style={
+              documentProcessing
+                ? { opacity: 0.5, cursor: "not-allowed" }
+                : undefined
+            }
+          >
+            {documentProcessing
+              ? "Importation en cours..."
+              : "📄 Ajouter un PDF"}
+          </button>
+        </div>
+      )}
+
+      {isAdmin && !roleLoading && message && (
+        <p className="document-upload-message">{message}</p>
+      )}
+
+      {viewerMode && viewerMessage && (
+        <p className="document-upload-message">{viewerMessage}</p>
       )}
 
       {indexingIsActive && generationProgress && (
@@ -1177,10 +1393,7 @@ function DocumentUpload() {
               marginBottom: "10px",
             }}
           >
-            <strong>
-              Classification : {generationProgress.document}
-            </strong>
-
+            <strong>Classification : {generationProgress.document}</strong>
             <strong>{indexingPercent}%</strong>
           </div>
 
@@ -1223,21 +1436,24 @@ function DocumentUpload() {
       <section className="document-list">
         <div className="document-list-header">
           <div>
-            <h2>Documents disponibles</h2>
+            <h2>
+              {viewerMode ? "Bibliothèque de documents" : "Documents disponibles"}
+            </h2>
+
             <p>
-              Documents actuellement disponibles sur la plateforme.
+              {viewerMode
+                ? "Consultez les documents PDF disponibles."
+                : "Documents actuellement disponibles sur la plateforme."}
             </p>
           </div>
 
-          <span className="document-count">
-            {documents.length}
-          </span>
+          {isAdmin && !roleLoading && (
+            <span className="document-count">{documents.length}</span>
+          )}
         </div>
 
         {loadingDocuments ? (
-          <p className="document-list-empty">
-            Chargement des documents...
-          </p>
+          <p className="document-list-empty">Chargement des documents...</p>
         ) : documents.length === 0 ? (
           <p className="document-list-empty">
             Aucun document n'est actuellement disponible.
@@ -1245,9 +1461,36 @@ function DocumentUpload() {
         ) : (
           <div className="document-items">
             {documents.map((document) => {
-              const activeFilename = localStorage.getItem(
-                ACTIVE_DOCUMENT_KEY,
-              );
+              const viewing = viewingFiles.includes(document.file);
+
+              if (viewerMode) {
+                return (
+                  <article
+                    className="document-item document-item-viewer"
+                    key={document.id}
+                  >
+                    <div className="document-item-icon" aria-hidden="true">
+                      📄
+                    </div>
+
+                    <div className="document-item-info">
+                      <h3>{document.file}</h3>
+                    </div>
+
+                    <button
+                      type="button"
+                      className="document-view-button"
+                      onClick={() => void handleViewPdf(document.file)}
+                      disabled={viewing}
+                      title={`Consulter ${document.file}`}
+                    >
+                      {viewing ? "Ouverture..." : "Consulter"}
+                    </button>
+                  </article>
+                );
+              }
+
+              const activeFilename = localStorage.getItem(ACTIVE_DOCUMENT_KEY);
 
               const progressForDocument =
                 generationProgress?.document === document.file
@@ -1263,15 +1506,10 @@ function DocumentUpload() {
                 activeFilename === document.file &&
                 (
                   uploading ||
-                  (
-                    externalUploadInProgress &&
-                    !generationPaused
-                  ) ||
+                  (externalUploadInProgress && !generationPaused) ||
                   (
                     progressForDocument !== null &&
-                    ACTIVE_PROCESSING_STATUSES.includes(
-                      progressForDocument.status,
-                    )
+                    ACTIVE_PROCESSING_STATUSES.includes(progressForDocument.status)
                   )
                 );
 
@@ -1291,25 +1529,20 @@ function DocumentUpload() {
                         ? progressForDocument.status
                         : "indexing"
                     )
-                  : progressForDocument?.status ||
-                    document.processing_status;
+                  : progressForDocument?.status || document.processing_status;
 
               const displayedDocument = {
                 ...document,
                 processing_status: status,
               };
 
-              const statusLabel =
-                getDocumentStatusLabel(status);
+              const statusLabel = getDocumentStatusLabel(status);
 
               const statusDescription =
                 getDocumentStatusDescription(displayedDocument);
 
-              const statusClass =
-                getDocumentStatusClass(status);
-
-              const deleting =
-                deletingFiles.includes(document.file);
+              const statusClass = getDocumentStatusClass(status);
+              const deleting = deletingFiles.includes(document.file);
 
               const generationActive = [
                 "queued",
@@ -1325,36 +1558,77 @@ function DocumentUpload() {
                 generationControlFiles.includes(document.file);
 
               const otherProcessingDocument =
-                documentProcessing &&
-                activeFilename !== document.file;
+                documentProcessing && activeFilename !== document.file;
 
-              const generationInProgress =
-                [
-                  "pending",
-                  "indexing",
-                  "generating",
-                  "queued",
-                  "running",
-                  "pausing",
-                  "paused",
-                ].includes(status || "");
+              const generationInProgress = [
+                "pending",
+                "indexing",
+                "generating",
+                "queued",
+                "running",
+                "pausing",
+                "paused",
+              ].includes(status || "");
+
+              const easyProgress = progressForDocument?.easy ?? document.easy;
+              const mediumProgress = progressForDocument?.medium ?? document.medium;
+              const hardProgress = progressForDocument?.hard ?? document.hard;
+
+              const hasQuestionProgress = [
+                easyProgress,
+                mediumProgress,
+                hardProgress,
+              ].some(
+                (progress) =>
+                  progress !== undefined &&
+                  (
+                    progress.target > 0 ||
+                    progress.current > 0 ||
+                    [
+                      "running",
+                      "queued",
+                      "completed",
+                      "paused",
+                      "incomplete",
+                      "error",
+                    ].includes(progress.status)
+                  ),
+              );
+
+              const showQuestionProgress =
+                hasQuestionProgress &&
+                status !== "waiting_manual" &&
+                status !== "indexing" &&
+                status !== "pending" &&
+                status !== "not_started";
 
               return (
-                <div
-                  className="document-item"
-                  key={document.id}
-                >
-                  <div className="document-item-icon">📄</div>
+                <div className="document-item" key={document.id}>
+                  <button
+                    type="button"
+                    className="document-item-icon"
+                    onClick={() => void handleViewPdf(document.file)}
+                    disabled={viewing || deleting}
+                    title={`Consulter le PDF ${document.file}`}
+                    aria-label={`Consulter le PDF ${document.file}`}
+                    style={{
+                      border: "none",
+                      cursor: viewing || deleting ? "wait" : "pointer",
+                      background: "transparent",
+                      padding: 0,
+                      font: "inherit",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {viewing ? "⏳" : "📄"}
+                  </button>
 
                   <div className="document-item-info">
                     <h3>{document.file}</h3>
-
                     <p>{statusDescription}</p>
 
                     <div className="document-item-status">
-                      <span
-                        className={`generation-status ${statusClass}`}
-                      >
+                      <span className={`generation-status ${statusClass}`}>
                         {statusLabel}
                       </span>
                     </div>
@@ -1362,9 +1636,7 @@ function DocumentUpload() {
                     <button
                       type="button"
                       className="document-generate-button"
-                      onClick={() =>
-                        void handleGenerateQuestions(document.file)
-                      }
+                      onClick={() => void handleGenerateQuestions(document.file)}
                       disabled={
                         deleting ||
                         uploading ||
@@ -1379,6 +1651,53 @@ function DocumentUpload() {
                           ? "Génération en cours..."
                           : "▶ Générer les questions"}
                     </button>
+
+                    {showQuestionProgress && (
+                      <section
+                        aria-label={`Progression des questions pour ${document.file}`}
+                        aria-live="polite"
+                        style={{
+                          width: "100%",
+                          marginTop: "12px",
+                        }}
+                      >
+                        <div
+                          style={{
+                            marginBottom: "8px",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                          }}
+                        >
+                          Progression des questions
+                        </div>
+
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                            gap: "8px",
+                          }}
+                        >
+                          <DifficultyProgressBar
+                            label="Faciles"
+                            progress={easyProgress}
+                            color="#16A34A"
+                          />
+
+                          <DifficultyProgressBar
+                            label="Intermédiaires"
+                            progress={mediumProgress}
+                            color="#D97706"
+                          />
+
+                          <DifficultyProgressBar
+                            label="Difficiles"
+                            progress={hardProgress}
+                            color="#7C3AED"
+                          />
+                        </div>
+                      </section>
+                    )}
 
                     {generationActive && (
                       <button

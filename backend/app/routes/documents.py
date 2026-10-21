@@ -1,6 +1,8 @@
+
 import asyncio
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -9,7 +11,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.services.auth import verify_token
@@ -38,6 +40,7 @@ MAX_FILE_SIZE = 20 * 1024 * 1024
 
 
 def verify_admin(payload: dict):
+    """Réserve la gestion des documents aux administrateurs."""
     if payload.get("role") != "admin":
         raise HTTPException(
             status_code=403,
@@ -66,6 +69,7 @@ def get_document_progress_with_pause(filename: str) -> dict:
 
 @router.get("")
 def list_documents(payload: dict = Depends(verify_token)):
+    """Permet aux utilisateurs connectés de consulter la liste des PDF."""
     try:
         documents = get_all_documents()
         enriched_documents = []
@@ -135,11 +139,76 @@ def list_documents(payload: dict = Depends(verify_token)):
         )
 
 
+@router.get("/{filename}/view")
+def view_document_pdf(
+    filename: str,
+    payload: dict = Depends(verify_token),
+):
+    """
+    Permet à tout utilisateur authentifié de consulter un PDF.
+    N'accorde aucun droit de gestion du document.
+    """
+    filename = Path(filename).name
+
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Seuls les fichiers PDF peuvent être consultés.",
+        )
+
+    documents = get_all_documents()
+
+    document = next(
+        (
+            item
+            for item in documents
+            if item.get("file") == filename
+        ),
+        None,
+    )
+
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Document introuvable ou non indexé.",
+        )
+
+    documents_root = DOCUMENTS_DIR.resolve()
+    file_path = (documents_root / filename).resolve()
+
+    try:
+        file_path.relative_to(documents_root)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Chemin de document invalide.",
+        )
+
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Le fichier PDF original est introuvable sur le serveur.",
+        )
+
+    return FileResponse(
+        path=str(file_path),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f"inline; filename*=UTF-8''{quote(filename)}"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 @router.get("/{filename}/progress")
 def document_progress(
     filename: str,
     payload: dict = Depends(verify_token),
 ):
+    """Autorise la consultation de la progression aux utilisateurs connectés."""
     filename = Path(filename).name
 
     if not filename.lower().endswith(".pdf"):
@@ -168,6 +237,7 @@ async def document_progress_stream(
     filename: str,
     payload: dict = Depends(verify_token),
 ):
+    """Diffuse la progression en temps réel aux utilisateurs connectés."""
     filename = Path(filename).name
 
     if not filename.lower().endswith(".pdf"):
@@ -266,6 +336,7 @@ async def upload_document(
     file: UploadFile = File(...),
     payload: dict = Depends(verify_token),
 ):
+    """Importation et indexation réservées aux administrateurs."""
     verify_admin(payload)
 
     if not file.filename:
@@ -504,6 +575,7 @@ def remove_document(
     filename: str,
     payload: dict = Depends(verify_token),
 ):
+    """Suppression réservée aux administrateurs."""
     verify_admin(payload)
 
     filename = Path(filename).name

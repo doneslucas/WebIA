@@ -60,12 +60,6 @@ function Profile() {
   }
 
 
-  function logout() {
-    localStorage.removeItem("access_token");
-    navigate("/login");
-  }
-
-
   function openPasswordForm() {
     setPasswordMessage("");
     setPasswordSuccess(false);
@@ -449,14 +443,6 @@ function Profile() {
           {role === "admin" && (
             <DocumentUpload />
           )}
-
-
-          <button
-            className="profile-logout-button"
-            onClick={logout}
-          >
-            Se déconnecter
-          </button>
 
         </div>
 

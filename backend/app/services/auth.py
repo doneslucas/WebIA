@@ -1,10 +1,16 @@
+
 import os
 import jwt
 import bcrypt
 
 from datetime import datetime, timedelta, timezone
+
 from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import (
+    HTTPBearer,
+    HTTPAuthorizationCredentials,
+)
+
 from dotenv import load_dotenv
 
 
@@ -25,7 +31,7 @@ REFRESH_TOKEN_EXPIRE_DAYS = 7
 def hash_password(password: str) -> str:
     password_hash = bcrypt.hashpw(
         password.encode("utf-8"),
-        bcrypt.gensalt()
+        bcrypt.gensalt(),
     )
 
     return password_hash.decode("utf-8")
@@ -33,18 +39,18 @@ def hash_password(password: str) -> str:
 
 def verify_password(
     password: str,
-    password_hash: str
+    password_hash: str,
 ) -> bool:
     return bcrypt.checkpw(
         password.encode("utf-8"),
-        password_hash.encode("utf-8")
+        password_hash.encode("utf-8"),
     )
 
 
 def create_access_token(
     user_id: int,
     email: str,
-    role: str
+    role: str,
 ) -> str:
     payload = {
         "user_id": user_id,
@@ -54,22 +60,22 @@ def create_access_token(
         "exp": (
             datetime.now(timezone.utc)
             + timedelta(
-                minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+                minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
             )
-        )
+        ),
     }
 
     return jwt.encode(
         payload,
         JWT_SECRET,
-        algorithm="HS256"
+        algorithm="HS256",
     )
 
 
 def create_refresh_token(
     user_id: int,
     email: str,
-    role: str
+    role: str,
 ) -> str:
     payload = {
         "user_id": user_id,
@@ -79,20 +85,20 @@ def create_refresh_token(
         "exp": (
             datetime.now(timezone.utc)
             + timedelta(
-                days=REFRESH_TOKEN_EXPIRE_DAYS
+                days=REFRESH_TOKEN_EXPIRE_DAYS,
             )
-        )
+        ),
     }
 
     return jwt.encode(
         payload,
         JWT_SECRET,
-        algorithm="HS256"
+        algorithm="HS256",
     )
 
 
 def verify_token(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
+    credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     token = credentials.credentials
 
@@ -100,13 +106,13 @@ def verify_token(
         payload = jwt.decode(
             token,
             JWT_SECRET,
-            algorithms=["HS256"]
+            algorithms=["HS256"],
         )
 
         if payload.get("type") != "access":
             raise HTTPException(
                 status_code=401,
-                detail="Token d'accès invalide."
+                detail="Token d'accès invalide.",
             )
 
         return payload
@@ -114,30 +120,49 @@ def verify_token(
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=401,
-            detail="Token expiré"
+            detail="Token expiré",
         )
 
     except jwt.InvalidTokenError:
         raise HTTPException(
             status_code=401,
-            detail="Token invalide"
+            detail="Token invalide",
         )
 
 
+def require_admin(
+    current_user: dict = Depends(verify_token),
+) -> dict:
+    """
+    Autorise uniquement les utilisateurs ayant le rôle admin.
+    À utiliser sur les routes réservées à l'administration.
+    """
+
+    role = str(current_user.get("role", "")).strip().lower()
+
+    if role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Accès réservé aux administrateurs.",
+        )
+
+    return current_user
+
+
 def verify_refresh_token(
-    token: str
+    token: str,
 ):
     try:
         payload = jwt.decode(
             token,
             JWT_SECRET,
-            algorithms=["HS256"]
+            algorithms=["HS256"],
         )
 
         if payload.get("type") != "refresh":
             raise HTTPException(
                 status_code=401,
-                detail="Refresh token invalide."
+                detail="Refresh token invalide.",
             )
 
         return payload
@@ -145,11 +170,11 @@ def verify_refresh_token(
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=401,
-            detail="Refresh token expiré."
+            detail="Refresh token expiré.",
         )
 
     except jwt.InvalidTokenError:
         raise HTTPException(
             status_code=401,
-            detail="Refresh token invalide."
+            detail="Refresh token invalide.",
         )
