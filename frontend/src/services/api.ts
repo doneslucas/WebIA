@@ -1,4 +1,3 @@
-
 const API_URL = "http://127.0.0.1:8000";
 
 
@@ -309,11 +308,6 @@ export async function getDocuments() {
 
 /**
  * Récupère le PDF original avec authentification.
- * Le composant peut ensuite l'afficher dans un nouvel onglet
- * à partir d'une URL Blob temporaire.
- *
- * Le backend autorise la consultation aux utilisateurs connectés,
- * sans leur accorder de droits de gestion du document.
  */
 export async function getDocumentPdf(filename: string): Promise<Response> {
   return authenticatedFetch(
@@ -347,7 +341,7 @@ export async function deleteDocument(filename: string) {
 
 
 /**
- * Lance la génération des questions.
+ * Lance la génération des questions pour un document.
  * Le backend réserve cette action aux administrateurs.
  */
 export async function generateDocumentQuestions(filename: string) {
@@ -435,10 +429,21 @@ export async function getQuizCategories() {
 // Quiz
 // -------------------------------------------------
 
+/**
+ * Génère un quiz.
+ *
+ * allowShortQuiz = false :
+ * le nombre demandé doit être disponible pour cet utilisateur.
+ *
+ * allowShortQuiz = true :
+ * le backend peut retourner un quiz plus court, avec les questions
+ * disponibles que l'utilisateur n'a pas encore utilisées.
+ */
 export async function generateQuiz(
   categoryIds: number[],
   questionCount: number,
   difficulty: string,
+  allowShortQuiz = false,
 ) {
   const response = await authenticatedFetch(
     `${API_URL}/quiz/generate`,
@@ -451,6 +456,7 @@ export async function generateQuiz(
         category_ids: categoryIds,
         question_count: questionCount,
         difficulty,
+        allow_short_quiz: allowShortQuiz,
       }),
     },
   );
@@ -461,11 +467,22 @@ export async function generateQuiz(
 }
 
 
+/**
+ * Génère un quiz avec deux difficultés.
+ *
+ * La difficulté principale est prioritaire :
+ * le backend utilise d'abord ses questions non jouées, puis complète
+ * avec la difficulté secondaire.
+ *
+ * allowShortQuiz = true autorise un quiz plus court si les deux
+ * difficultés réunies ne suffisent pas.
+ */
 export async function generateMixedQuiz(
   categoryIds: number[],
   questionCount: number,
   primaryDifficulty: string,
   secondaryDifficulty: string,
+  allowShortQuiz = false,
 ) {
   const response = await authenticatedFetch(
     `${API_URL}/quiz/generate-mixed`,
@@ -479,6 +496,7 @@ export async function generateMixedQuiz(
         question_count: questionCount,
         primary_difficulty: primaryDifficulty,
         secondary_difficulty: secondaryDifficulty,
+        allow_short_quiz: allowShortQuiz,
       }),
     },
   );
@@ -489,6 +507,43 @@ export async function generateMixedQuiz(
 }
 
 
+/**
+ * Demande au backend de mettre en file la génération des questions
+ * manquantes dans les catégories et la difficulté sélectionnées.
+ *
+ * Le backend doit répondre avec un statut de mise en file, le nombre
+ * de tâches ajoutées et une estimation lorsqu'elle est disponible.
+ */
+export async function requestQuizQuestionGeneration(
+  categoryIds: number[],
+  difficulty: string,
+) {
+  const response = await authenticatedFetch(
+    `${API_URL}/quiz/request-generation`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        category_ids: categoryIds,
+        difficulty,
+      }),
+    },
+  );
+
+  const data = await response.json();
+
+  return { response, data };
+}
+
+
+/**
+ * Récupère la progression de génération pour les catégories demandées.
+ *
+ * Le backend devra distinguer les questions présentes dans la banque
+ * des questions encore disponibles pour cet utilisateur.
+ */
 export async function getQuizGenerationStatus(
   categoryIds: number[],
   questionCount: number,

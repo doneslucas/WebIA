@@ -1,4 +1,3 @@
-
 import json
 import re
 from typing import Optional
@@ -108,8 +107,30 @@ def validate_difficulty(difficulty: str):
         )
 
 
-def validate_question_count(question_count: int):
-    if question_count not in VALID_QUESTION_COUNTS:
+def validate_question_count(
+    question_count: int,
+    allow_short_quiz: bool = False,
+):
+    """
+    Les quiz normaux acceptent 5, 10, 15 ou 20 questions.
+    Les quiz raccourcis peuvent en accepter de 1 à 20.
+    """
+    if allow_short_quiz:
+        if (
+            not isinstance(question_count, int)
+            or isinstance(question_count, bool)
+            or not 1 <= question_count <= 20
+        ):
+            raise ValueError(
+                "Le nombre de questions doit être compris entre 1 et 20."
+            )
+        return
+
+    if (
+        not isinstance(question_count, int)
+        or isinstance(question_count, bool)
+        or question_count not in VALID_QUESTION_COUNTS
+    ):
         raise ValueError(
             "Le nombre de questions doit être 5, 10, 15 ou 20."
         )
@@ -121,6 +142,7 @@ def validate_question_count(question_count: int):
 
 def get_question_validation_error(question) -> Optional[str]:
     """Retourne la raison du rejet, ou None si la question est valide."""
+
     if not isinstance(question, dict):
         return "La question n'est pas un objet JSON."
 
@@ -176,7 +198,10 @@ def get_question_validation_error(question) -> Optional[str]:
         )
 
     if correct_answer not in {0, 1, 2, 3}:
-        return "Le champ 'correct_answer' est en dehors de l'intervalle autorisé."
+        return (
+            "Le champ 'correct_answer' est en dehors "
+            "de l'intervalle autorisé."
+        )
 
     explanation = question.get("explanation")
 
@@ -192,6 +217,7 @@ def is_valid_generated_question(question) -> bool:
 
 def validate_quiz(data):
     """Vérifie la structure générale d'une réponse du modèle."""
+
     return (
         isinstance(data, dict)
         and isinstance(data.get("questions"), list)
@@ -313,6 +339,7 @@ def get_available_chunks(
     category_ids: Optional[list[int]] = None,
 ):
     """Retourne les chunks classés qui ont encore une capacité disponible."""
+
     validate_difficulty(difficulty)
     category_ids = validate_category_ids(category_ids)
     document_ids = get_documents_scope(document)
@@ -412,6 +439,7 @@ def get_max_capacity(
     document: Optional[str] = None,
 ):
     """Calcule la capacité théorique des chunks classifiés."""
+
     if difficulty is not None:
         validate_difficulty(difficulty)
 
@@ -542,6 +570,7 @@ def get_existing_questions(
     document: Optional[str] = None,
 ):
     """Récupère les questions présentes, éventuellement par document/catégorie."""
+
     category_ids = validate_category_ids(category_ids)
     category_sql, category_params = get_category_filter_sql(category_ids)
 
@@ -630,7 +659,11 @@ def generate_quiz_batch(
     if not isinstance(context, str) or not context.strip():
         raise ValueError("Le contenu source est vide.")
 
-    if batch_size < 1:
+    if (
+        not isinstance(batch_size, int)
+        or isinstance(batch_size, bool)
+        or batch_size < 1
+    ):
         raise ValueError("Le nombre de questions demandé doit être positif.")
 
     category_instruction = (
@@ -816,6 +849,7 @@ Consignes supplémentaires :
         f"Dernière erreur : {last_error}"
     )
 
+
 # ============================================================
 # SAUVEGARDE DES QUESTIONS
 # ============================================================
@@ -826,6 +860,7 @@ def save_questions(
     difficulty: str,
 ):
     """Sauvegarde avec limites par chunk et contrôle des doublons."""
+
     validate_difficulty(difficulty)
     saved_questions = []
 
@@ -1220,6 +1255,7 @@ def generate_questions_for_bank(
 
     return generated_count
 
+
 # ============================================================
 # QUESTIONS DÉJÀ VUES PAR UN UTILISATEUR
 # ============================================================
@@ -1241,6 +1277,7 @@ def get_user_seen_question_ids(
         JOIN document_chunks dc ON qq.chunk_id = dc.id
         WHERE qr.user_id = %s
           AND qq.difficulty = %s
+          AND dc.category_id IS NOT NULL
           {category_sql}
     """
 
@@ -1260,6 +1297,57 @@ def get_user_seen_question_ids(
 
 
 # ============================================================
+# COMPTAGE DES QUESTIONS NON ENCORE JOUÉES
+# ============================================================
+
+def count_unseen_questions(
+    user_id: int,
+    difficulty: str,
+    category_ids: Optional[list[int]] = None,
+):
+    """
+    Compte les questions classifiées que cet utilisateur
+    peut encore jouer pour une difficulté et les catégories demandées.
+    """
+
+    validate_difficulty(difficulty)
+    category_ids = validate_category_ids(category_ids)
+
+    category_sql, category_params = get_category_filter_sql(category_ids)
+
+    seen_question_ids = get_user_seen_question_ids(
+        user_id=user_id,
+        difficulty=difficulty,
+        category_ids=category_ids,
+    )
+
+    query = f"""
+        SELECT COUNT(*)
+        FROM quiz_questions qq
+        JOIN document_chunks dc ON qq.chunk_id = dc.id
+        WHERE qq.difficulty = %s
+          AND dc.category_id IS NOT NULL
+          {category_sql}
+    """
+
+    params = [
+        difficulty,
+        *category_params,
+    ]
+
+    if seen_question_ids:
+        query += " AND NOT (qq.id = ANY(%s))"
+        params.append(list(seen_question_ids))
+
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, params)
+            result = cursor.fetchone()
+
+    return int(result[0] or 0)
+
+
+# ============================================================
 # RÉCUPÉRATION ALÉATOIRE DE QUESTIONS
 # ============================================================
 
@@ -1271,6 +1359,9 @@ def get_random_questions(
 ):
     validate_difficulty(difficulty)
     category_ids = validate_category_ids(category_ids)
+
+    if question_count <= 0:
+        return []
 
     seen_question_ids = get_user_seen_question_ids(
         user_id=user_id,
@@ -1289,6 +1380,7 @@ def get_random_questions(
         FROM quiz_questions qq
         JOIN document_chunks dc ON qq.chunk_id = dc.id
         WHERE qq.difficulty = %s
+          AND dc.category_id IS NOT NULL
           {category_sql}
     """
 
@@ -1305,6 +1397,7 @@ def get_random_questions(
         ORDER BY RANDOM()
         LIMIT %s
     """
+
     params.append(question_count)
 
     with get_connection() as conn:
@@ -1412,8 +1505,13 @@ def generate_quiz(
     difficulty: str,
     user_id: int,
     category_ids: Optional[list[int]] = None,
+    allow_short_quiz: bool = False,
 ):
-    validate_question_count(question_count)
+    validate_question_count(
+        question_count,
+        allow_short_quiz=allow_short_quiz,
+    )
+
     validate_difficulty(difficulty)
     category_ids = validate_category_ids(category_ids)
 
@@ -1422,14 +1520,44 @@ def generate_quiz(
             "Au moins une catégorie doit être sélectionnée."
         )
 
-    available_count = count_questions(
+    # On compte uniquement les questions non encore jouées.
+    available_count = count_unseen_questions(
+        user_id=user_id,
         difficulty=difficulty,
         category_ids=category_ids,
     )
 
-    if available_count < question_count:
+    if available_count < question_count and not allow_short_quiz:
         status = get_bank_status(category_ids=category_ids)
         difficulty_status = status[difficulty]
+
+        missing_count = max(
+            0,
+            question_count - available_count,
+        )
+
+        mixed_difficulties = []
+
+        for fallback_difficulty in ("easy", "medium", "hard"):
+            if fallback_difficulty == difficulty:
+                continue
+
+            fallback_available = count_unseen_questions(
+                user_id=user_id,
+                difficulty=fallback_difficulty,
+                category_ids=category_ids,
+            )
+
+            mixed_difficulties.append({
+                "difficulty": fallback_difficulty,
+                "available_count": fallback_available,
+                "questions_needed": missing_count,
+            })
+
+        mixed_enabled = any(
+            option["available_count"] >= missing_count
+            for option in mixed_difficulties
+        )
 
         return {
             "status": "insufficient_questions",
@@ -1437,7 +1565,7 @@ def generate_quiz(
             "difficulty": difficulty,
             "requested_count": question_count,
             "available_count": available_count,
-            "missing_count": max(0, question_count - available_count),
+            "missing_count": missing_count,
             "target_count": difficulty_status["target"],
             "capacity": difficulty_status["capacity"],
             "generation_active": difficulty_status["needs_generation"],
@@ -1450,30 +1578,38 @@ def generate_quiz(
                     ),
                 },
                 "mixed": {
-                    "enabled": False,
-                    "difficulties": [],
+                    "enabled": mixed_enabled,
+                    "difficulties": mixed_difficulties,
                 },
                 "wait": {
                     "enabled": True,
-                    "missing_count": max(
-                        0,
-                        question_count - available_count,
-                    ),
+                    "missing_count": missing_count,
                     "generation_active": difficulty_status["needs_generation"],
                 },
             },
         }
 
+    # Un quiz raccourci utilise les questions non jouées disponibles.
+    actual_count = min(
+        question_count,
+        available_count,
+    )
+
+    if actual_count <= 0:
+        raise ValueError(
+            "Aucune question non jouée n'est disponible pour cette difficulté."
+        )
+
     questions = get_random_questions(
         difficulty=difficulty,
-        question_count=question_count,
+        question_count=actual_count,
         user_id=user_id,
         category_ids=category_ids,
     )
 
-    if len(questions) < question_count:
+    if not questions:
         raise ValueError(
-            "Pas assez de questions non vues disponibles pour cet utilisateur."
+            "Aucune question non jouée n'est disponible pour ce quiz."
         )
 
     return {
@@ -1494,10 +1630,16 @@ def generate_mixed_quiz(
     secondary_difficulty: str,
     user_id: int,
     category_ids: Optional[list[int]] = None,
+    allow_short_quiz: bool = False,
 ):
-    validate_question_count(question_count)
+    validate_question_count(
+        question_count,
+        allow_short_quiz=allow_short_quiz,
+    )
+
     validate_difficulty(primary_difficulty)
     validate_difficulty(secondary_difficulty)
+
     category_ids = validate_category_ids(category_ids)
 
     if not category_ids:
@@ -1510,52 +1652,79 @@ def generate_mixed_quiz(
             "Les deux difficultés doivent être différentes."
         )
 
-    primary_count = (question_count + 1) // 2
-    secondary_count = question_count - primary_count
-
-    primary_available = count_questions(
+    primary_available = count_unseen_questions(
+        user_id=user_id,
         difficulty=primary_difficulty,
         category_ids=category_ids,
     )
 
-    if primary_available < primary_count:
-        raise ValueError(
-            "Pas assez de questions disponibles pour la difficulté "
-            f"{primary_difficulty}. Disponibles : {primary_available}. "
-            f"Demandées : {primary_count}."
-        )
-
-    secondary_available = count_questions(
+    secondary_available = count_unseen_questions(
+        user_id=user_id,
         difficulty=secondary_difficulty,
         category_ids=category_ids,
     )
 
-    if secondary_available < secondary_count:
+    total_available = primary_available + secondary_available
+
+    if total_available < question_count and not allow_short_quiz:
         raise ValueError(
-            "Pas assez de questions disponibles pour la difficulté "
-            f"{secondary_difficulty}. Disponibles : {secondary_available}. "
-            f"Demandées : {secondary_count}."
+            "Pas assez de questions non jouées dans les deux difficultés. "
+            f"Disponibles : {total_available}. "
+            f"Demandées : {question_count}."
         )
 
-    primary_questions = get_random_questions(
-        difficulty=primary_difficulty,
-        question_count=primary_count,
-        user_id=user_id,
-        category_ids=category_ids,
+    actual_count = min(
+        question_count,
+        total_available,
     )
 
-    secondary_questions = get_random_questions(
-        difficulty=secondary_difficulty,
-        question_count=secondary_count,
-        user_id=user_id,
-        category_ids=category_ids,
+    if actual_count <= 0:
+        raise ValueError(
+            "Aucune question non jouée n'est disponible dans ces difficultés."
+        )
+
+    # Priorité à la difficulté sélectionnée.
+    primary_count = min(
+        primary_available,
+        actual_count,
     )
+
+    secondary_count = min(
+        secondary_available,
+        actual_count - primary_count,
+    )
+
+    primary_questions = []
+
+    if primary_count > 0:
+        primary_questions = get_random_questions(
+            difficulty=primary_difficulty,
+            question_count=primary_count,
+            user_id=user_id,
+            category_ids=category_ids,
+        )
+
+    secondary_questions = []
+
+    if secondary_count > 0:
+        secondary_questions = get_random_questions(
+            difficulty=secondary_difficulty,
+            question_count=secondary_count,
+            user_id=user_id,
+            category_ids=category_ids,
+        )
 
     questions = primary_questions + secondary_questions
 
-    if len(questions) < question_count:
+    if not questions:
         raise ValueError(
-            "Pas assez de questions non vues disponibles pour générer ce quiz."
+            "Impossible de récupérer les questions non jouées."
+        )
+
+    if len(questions) < question_count and not allow_short_quiz:
+        raise ValueError(
+            "Le nombre de questions non jouées a changé pendant "
+            "la préparation du quiz. Veuillez réessayer."
         )
 
     return {
