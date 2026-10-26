@@ -1,115 +1,81 @@
-import json
+
 import os
+import time
 
 from dotenv import load_dotenv
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 
 from app.services.chroma import search_chunks
 
-
 load_dotenv()
 
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "localhost")
+OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
+OLLAMA_BASE_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 
-OLLAMA_HOST = os.getenv(
-    "OLLAMA_HOST",
-    "localhost"
-)
-
-OLLAMA_PORT = os.getenv(
-    "OLLAMA_PORT",
-    "11434"
-)
-
-OLLAMA_BASE_URL = (
-    f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
-)
-
+RAG_NUM_PREDICT = 200
+RAG_N_RESULTS = 2
+RAG_MAX_CHARS_PER_CHUNK = 1500
 
 embeddings = OllamaEmbeddings(
     model="nomic-embed-text",
-    base_url=OLLAMA_BASE_URL
+    base_url=OLLAMA_BASE_URL,
 )
 
-
 llm = OllamaLLM(
-    model="qwen2.5:7b",
+    model="qwen2.5:3b",
     base_url=OLLAMA_BASE_URL,
-    num_predict=250
+    num_predict=RAG_NUM_PREDICT,
+    num_ctx=2048,
+    temperature=0.1,
+    keep_alive="10m",
 )
 
 
 def ask_rag(question: str):
+    total_start = time.perf_counter()
 
-    # --------------------------------------------------------
-    # 1. Transformation de la question en vecteur
-    # --------------------------------------------------------
+    start = time.perf_counter()
+    query_vector = embeddings.embed_query(question)
+    embedding_time = time.perf_counter() - start
 
-    query_vector = embeddings.embed_query(
-        question
+    start = time.perf_counter()
+    results = search_chunks(query_vector, n_results=RAG_N_RESULTS)
+    search_time = time.perf_counter() - start
+
+    documents = results.get("documents", [[]])
+    metadatas = results.get("metadatas", [[]])
+
+    chunks = documents[0] if documents and documents[0] else []
+    chunk_metadatas = metadatas[0] if metadatas and metadatas[0] else []
+
+    no_answer_message = (
+        "Je ne peux pas répondre à cette question "
+        "à partir des documents fournis."
     )
-
-    # --------------------------------------------------------
-    # 2. Recherche des chunks les plus proches
-    # --------------------------------------------------------
-
-    results = search_chunks(
-        query_vector,
-        n_results=5
-    )
-
-    documents = results.get(
-        "documents",
-        [[]]
-    )
-
-    metadatas = results.get(
-        "metadatas",
-        [[]]
-    )
-
-    chunks = (
-        documents[0]
-        if documents and documents[0]
-        else []
-    )
-
-    chunk_metadatas = (
-        metadatas[0]
-        if metadatas and metadatas[0]
-        else []
-    )
-
-    # --------------------------------------------------------
-    # 3. Vérification qu'il existe bien du contenu
-    # --------------------------------------------------------
 
     if not chunks:
+        print(
+            f"[RAG] embedding={embedding_time:.2f}s "
+            f"recherche={search_time:.2f}s "
+            f"total={time.perf_counter() - total_start:.2f}s"
+        )
+        return {"answer": no_answer_message, "sources": []}
 
-        return {
-            "answer": (
-                "Je ne peux pas répondre à cette question "
-                "à partir des documents fournis."
-            ),
-            "sources": []
-        }
+    context_parts = [
+        chunk[:RAG_MAX_CHARS_PER_CHUNK]
+        for chunk in chunks
+        if chunk
+    ]
+    context = "\n\n".join(context_parts)
 
-    # --------------------------------------------------------
-    # 4. Construction du contexte
-    # --------------------------------------------------------
+    prompt = f"""Tu es un assistant spécialisé en cybersécurité.
+Réponds uniquement avec les informations du CONTEXTE.
+Si le contexte est insuffisant, réponds exactement :
+{no_answer_message}
 
-    context = "\n\n".join(
-        chunks
-    )
-
-    # --------------------------------------------------------
-    # 5. Prompt RAG
-    # --------------------------------------------------------
-
-    prompt = f"""
-Tu es un assistant spécialisé en cybersécurité.
-
-Tu dois répondre à la question UNIQUEMENT à partir
-du contenu des documents fourni dans CONTEXTE.
+Réponse directe et concise : 2 à 3 phrases maximum.
+N'invente aucune information.
 
 CONTEXTE :
 {context}
@@ -117,102 +83,55 @@ CONTEXTE :
 QUESTION :
 {question}
 
-RÈGLES ABSOLUES :
-
-1. Utilise uniquement les informations présentes dans CONTEXTE.
-
-2. Si CONTEXTE contient suffisamment d'informations
-   pour répondre à la question, réponds normalement.
-
-3. Si CONTEXTE ne contient pas la réponse, ou si les
-   informations sont insuffisantes pour répondre de
-   manière fiable, réponds exactement :
-
-Je ne peux pas répondre à cette question à partir des documents fournis.
-
-4. Dans ce dernier cas, n'invente aucune information.
-
-5. Ne déduis pas une réponse qui n'est pas justifiable
-   par CONTEXTE.
-
-6. Ne donne pas de connaissances générales extérieures
-   aux documents.
-
-Réponds uniquement avec la réponse finale destinée à
-l'utilisateur.
+RÉPONSE :
 """
 
-    # --------------------------------------------------------
-    # 6. Génération de la réponse
-    # --------------------------------------------------------
+    start = time.perf_counter()
+    response = llm.invoke(prompt)
+    generation_time = time.perf_counter() - start
 
-    response = llm.invoke(
-        prompt
+    answer = str(response).strip()
+    normalized_answer = " ".join(answer.lower().split())
+    normalized_no_answer = " ".join(no_answer_message.lower().split())
+
+    if normalized_answer == normalized_no_answer:
+        answer = no_answer_message
+        sources = []
+    else:
+        sources = []
+        seen_sources = set()
+
+        for metadata in chunk_metadatas:
+            if not metadata:
+                continue
+
+            filename = metadata.get("source")
+            page = metadata.get("page")
+
+            if not filename:
+                continue
+
+            source_key = (filename, page)
+
+            if source_key in seen_sources:
+                continue
+
+            seen_sources.add(source_key)
+            sources.append({
+                "file": filename,
+                "page": page,
+            })
+
+    total_time = time.perf_counter() - total_start
+
+    print(
+        f"[RAG] embedding={embedding_time:.2f}s "
+        f"recherche={search_time:.2f}s "
+        f"generation={generation_time:.2f}s "
+        f"total={total_time:.2f}s"
     )
-
-    answer = str(
-        response
-    ).strip()
-
-    # --------------------------------------------------------
-    # 7. Détection d'une absence de réponse dans les documents
-    # --------------------------------------------------------
-
-    no_answer_message = (
-        "Je ne peux pas répondre à cette question "
-        "à partir des documents fournis."
-    )
-
-    normalized_answer = (
-        " ".join(
-            answer.lower().split()
-        )
-    )
-
-    normalized_no_answer = (
-        " ".join(
-            no_answer_message.lower().split()
-        )
-    )
-
-    if (
-        normalized_answer
-        == normalized_no_answer
-    ):
-
-        return {
-            "answer": no_answer_message,
-            "sources": []
-        }
-
-    # --------------------------------------------------------
-    # 8. Les sources ne sont retournées que si une réponse
-    #    a réellement été trouvée dans les documents
-    # --------------------------------------------------------
-
-    sources = []
-
-    for metadata in chunk_metadatas:
-
-        if not metadata:
-            continue
-
-        sources.append(
-            {
-                "file": metadata.get(
-                    "source"
-                ),
-                "page": metadata.get(
-                    "page"
-                )
-            }
-        )
-
-    # --------------------------------------------------------
-    # 9. Réponse finale
-    # --------------------------------------------------------
 
     return {
         "answer": answer,
-        "sources": sources
+        "sources": sources,
     }

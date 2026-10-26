@@ -12,6 +12,7 @@ from app.services.quiz import (
     count_questions,
     get_max_capacity,
     generate_questions_for_bank,
+    GenerationCancelled,
     GenerationPaused,
 )
 
@@ -32,15 +33,20 @@ class QuestionBankManager:
         self.task_status = {}
         self.task_status_lock = threading.Lock()
 
-        # Les tâches en pause sont conservées hors de la file active.
-        # Elles ne seront remises dans la file qu'à la reprise du document.
-        self.paused_tasks = {}
-        self.paused_tasks_lock = threading.Lock()
-
-        # Pause manuelle indépendante de l'indexation.
+        # Pause manuelle indépendante des priorités des requêtes/PDF.
         self.pause_condition = threading.Condition()
         self.paused_documents = set()
         self.pause_acknowledged = set()
+        self.paused_tasks = set()
+        self.paused_tasks_lock = threading.Lock()
+
+        # Annulation limitée aux tâches créées par une demande précise.
+        self.request_lock = threading.RLock()
+        self.generation_request_tasks = {}
+        self.generation_request_owned_tasks = {}
+        self.task_request_owners = {}
+        self.request_owned_task_keys = set()
+        self.cancelled_task_keys = set()
 
     # --------------------------------------------------------
     # Démarrage et arrêt
@@ -54,14 +60,12 @@ class QuestionBankManager:
 
         self.running = True
         self.stop_event.clear()
-
         self.worker_thread = threading.Thread(
             target=self._worker_loop,
             name="QuestionBankManagerWorker",
             daemon=True,
         )
         self.worker_thread.start()
-
         print("[WebIA] QuestionBankManager démarré.")
 
     def stop(self):
@@ -71,17 +75,14 @@ class QuestionBankManager:
 
         self.running = False
         self.stop_event.set()
-
         with self.pause_condition:
             self.pause_condition.notify_all()
-
         self.task_queue.put(None)
 
         if self.worker_thread is not None:
             self.worker_thread.join(timeout=10)
 
         self.worker_thread = None
-
         print("[WebIA] QuestionBankManager arrêté.")
 
     def is_running(self):
@@ -105,28 +106,24 @@ class QuestionBankManager:
                 break
 
             document, category_id, difficulty = task
-
             task_key = self._make_task_key(
                 document,
                 category_id,
                 difficulty,
             )
-
             background_reserved = False
-            task_deferred = False
+            deferred = False
 
             try:
                 task_manager.start_background_operation()
                 background_reserved = True
 
-                # Si une pause est demandée avant le traitement,
-                # la tâche sera conservée hors de la file active.
-                self.wait_if_document_paused(
-                    document,
-                    task_key,
-                )
+                # Si le document est en pause, on libère le créneau de fond
+                # pendant l'attente pour ne pas bloquer les opérations prioritaires.
+                self.wait_if_document_paused(document, task_key)
 
-                if self._get_task_status_value(task_key) == "cancelled":
+                if self.is_task_cancelled(task_key) or self._get_task_status_value(task_key) == "cancelled":
+                    self._set_task_status(task_key, "cancelled")
                     continue
 
                 if not self._document_exists(document):
@@ -138,7 +135,6 @@ class QuestionBankManager:
                     continue
 
                 self._set_task_status(task_key, "running")
-
                 print(
                     "[WebIA] Traitement : "
                     f"document={document}, category_id={category_id}, "
@@ -157,14 +153,12 @@ class QuestionBankManager:
                         "cancelled",
                         error="Document supprimé pendant la génération.",
                     )
-
                 elif result["complete"] or result["target"] == 0:
                     self._set_task_status(
                         task_key,
                         "completed",
                         result=result,
                     )
-
                 else:
                     self._set_task_status(
                         task_key,
@@ -173,41 +167,21 @@ class QuestionBankManager:
                     )
 
             except GenerationPaused:
-                # Ne jamais réinsérer immédiatement la tâche dans la file.
-                # Elle reste dans pending_tasks, mais attend dans paused_tasks
-                # jusqu'à l'appel explicite de resume_document_tasks().
-                if not self.stop_event.is_set():
-                    task_deferred = True
+                # La pause est coopérative : on conserve la tâche en attente
+                # sans garder un créneau de génération actif.
+                deferred = True
+                with self.paused_tasks_lock:
+                    self.paused_tasks.add((document, category_id, difficulty))
+                self._set_task_status(task_key, "paused")
+                print(f"[WebIA] Tâche mise en pause : {task_key}")
 
-                    with self.paused_tasks_lock:
-                        document_tasks = self.paused_tasks.setdefault(
-                            document,
-                            {},
-                        )
-                        document_tasks[task_key] = task
-
-                    with self.pause_condition:
-                        self.paused_documents.add(document)
-                        self.pause_acknowledged.add(document)
-                        self.pause_condition.notify_all()
-
-                    self._set_task_status(
-                        task_key,
-                        "paused",
-                    )
-
-                    print(
-                        "[WebIA] Génération en pause ; tâche conservée "
-                        "hors de la file active : "
-                        f"document={document}, category_id={category_id}, "
-                        f"difficulty={difficulty}"
-                    )
-
-                else:
-                    self._set_task_status(
-                        task_key,
-                        "paused",
-                    )
+            except GenerationCancelled:
+                self._set_task_status(
+                    task_key,
+                    "cancelled",
+                    error="Génération annulée à la demande de l’utilisateur.",
+                )
+                print(f"[WebIA] Génération annulée : {task_key}")
 
             except Exception as exc:
                 self._set_task_status(
@@ -218,9 +192,7 @@ class QuestionBankManager:
 
                 try:
                     if self._document_exists(document):
-                        from app.services.indexer import (
-                            update_generation_progress,
-                        )
+                        from app.services.indexer import update_generation_progress
 
                         status = self.get_category_difficulty_status(
                             document=document,
@@ -236,7 +208,6 @@ class QuestionBankManager:
                             status="error",
                             category_id=category_id,
                         )
-
                 except Exception as progress_error:
                     print(
                         "[WebIA] Impossible de mettre à jour la progression : "
@@ -253,23 +224,28 @@ class QuestionBankManager:
                 if background_reserved:
                     task_manager.end_background_operation()
 
-                if not task_deferred:
-                    with self.pending_tasks_lock:
-                        self.pending_tasks.discard(task_key)
+                with self.pending_tasks_lock:
+                    self.pending_tasks.discard(task_key)
+                    document_still_pending = any(
+                        key[0] == document
+                        for key in self.pending_tasks
+                    )
 
-                        document_still_pending = any(
-                            key[0] == document
-                            for key in self.pending_tasks
-                        )
+                if not document_still_pending:
+                    with self.pause_condition:
+                        self.paused_documents.discard(document)
+                        self.pause_acknowledged.discard(document)
+                        self.pause_condition.notify_all()
 
-                    if not document_still_pending:
-                        with self.pause_condition:
-                            self.paused_documents.discard(document)
-                            self.pause_acknowledged.discard(document)
-                            self.pause_condition.notify_all()
+                with self.request_lock:
+                    self.cancelled_task_keys.discard(task_key)
+                    self.request_owned_task_keys.discard(task_key)
+                    self.task_request_owners.pop(task_key, None)
+                    for request_id, keys in list(self.generation_request_owned_tasks.items()):
+                        keys.discard(task_key)
+                        if not keys:
+                            self.generation_request_owned_tasks.pop(request_id, None)
 
-                # Chaque tâche retirée de la file active est comptabilisée
-                # comme terminée, même si elle attend une reprise manuelle.
                 self.task_queue.task_done()
 
     def _document_exists(self, document: str) -> bool:
@@ -294,11 +270,92 @@ class QuestionBankManager:
             ).get("status", "not_queued")
 
     # --------------------------------------------------------
+    # Annulation limitée à une demande de quiz
+    # --------------------------------------------------------
+
+    def register_generation_request(
+        self, request_id: str, document: str, category_id: int,
+        difficulty: str, task_created: bool,
+    ):
+        task_key = self._make_task_key(document, category_id, difficulty)
+        with self.request_lock:
+            self.generation_request_tasks.setdefault(request_id, set()).add(task_key)
+            if task_created and self._get_task_status_value(task_key) in {"queued", "running"}:
+                self.request_owned_task_keys.add(task_key)
+            # Une tâche préexistante (par exemple lancée à l’indexation)
+            # n’est jamais annulée par une demande de quiz qui l’a rejointe.
+            if task_key in self.request_owned_task_keys:
+                self.generation_request_owned_tasks.setdefault(request_id, set()).add(task_key)
+                self.task_request_owners.setdefault(task_key, set()).add(request_id)
+
+    def release_generation_request(self, request_id: str) -> dict:
+        """Détache une demande terminée sans arrêter les tâches restantes."""
+        released = 0
+        with self.request_lock:
+            owned_keys = self.generation_request_owned_tasks.pop(request_id, set())
+            self.generation_request_tasks.pop(request_id, None)
+            for task_key in owned_keys:
+                owners = self.task_request_owners.get(task_key, set())
+                owners.discard(request_id)
+                released += 1
+                if not owners:
+                    self.task_request_owners.pop(task_key, None)
+                    # Une génération libérée continue normalement, et ne sera
+                    # plus annulable par une autre demande qui la rejoint.
+                    self.request_owned_task_keys.discard(task_key)
+        return {"released_tasks": released}
+
+    def cancel_generation_request(self, request_id: str) -> dict:
+        cancelled = 0
+        protected = 0
+        with self.request_lock:
+            owned_keys = self.generation_request_owned_tasks.pop(request_id, set())
+            self.generation_request_tasks.pop(request_id, None)
+            for task_key in owned_keys:
+                owners = self.task_request_owners.get(task_key, set())
+                owners.discard(request_id)
+                if owners:
+                    protected += 1
+                    continue
+                self.task_request_owners.pop(task_key, None)
+                if task_key in self.pending_tasks:
+                    self.cancelled_task_keys.add(task_key)
+                    self._set_task_status(
+                        task_key, "cancelled",
+                        error="Génération annulée à la demande de l’utilisateur.",
+                    )
+                    with self.paused_tasks_lock:
+                        paused_match = next(
+                            (task for task in self.paused_tasks if self._make_task_key(*task) == task_key),
+                            None,
+                        )
+                        if paused_match is not None:
+                            self.paused_tasks.discard(paused_match)
+                    if paused_match is not None:
+                        with self.pending_tasks_lock:
+                            self.pending_tasks.discard(task_key)
+                        with self.request_lock:
+                            self.cancelled_task_keys.discard(task_key)
+                    cancelled += 1
+                else:
+                    self.request_owned_task_keys.discard(task_key)
+
+        # Réveille aussi une tâche qui attendait une reprise manuelle.
+        with self.pause_condition:
+            self.pause_condition.notify_all()
+
+        return {"cancelled_tasks": cancelled, "still_shared_tasks": protected}
+
+    def is_task_cancelled(self, task_key) -> bool:
+        with self.request_lock:
+            return task_key in self.cancelled_task_keys
+
+    # --------------------------------------------------------
     # Annulation des demandes d'un document
     # --------------------------------------------------------
 
     def cancel_document_tasks(self, document: str) -> int:
-        """Retire les tâches d'un document et libère sa pause."""
+        """Retire les tâches en attente d'un document et libère sa pause."""
         document = str(document)
         cancelled = 0
 
@@ -307,12 +364,10 @@ class QuestionBankManager:
             self.pause_acknowledged.discard(document)
             self.pause_condition.notify_all()
 
-        # Retirer également les tâches qui attendaient une reprise.
         with self.paused_tasks_lock:
-            paused_for_document = self.paused_tasks.pop(
-                document,
-                {},
-            )
+            paused_for_document = [task for task in self.paused_tasks if task[0] == document]
+            for task in paused_for_document:
+                self.paused_tasks.discard(task)
 
         with self.pending_tasks_lock:
             keys = [
@@ -328,10 +383,8 @@ class QuestionBankManager:
                     "cancelled",
                     error="Document supprimé.",
                 )
+                cancelled += 1
 
-        cancelled += len(paused_for_document)
-
-        # Retirer les tâches de ce document encore présentes dans la file.
         with self.task_queue.mutex:
             kept = []
 
@@ -360,9 +413,8 @@ class QuestionBankManager:
     # --------------------------------------------------------
 
     def pause_document_tasks(self, document: str):
-        """Demande une pause coopérative de la génération d'un PDF."""
+        """Demande une pause coopérative pour toutes les tâches d'un PDF."""
         document = str(document)
-
         with self.pending_tasks_lock:
             has_pending_tasks = any(
                 key[0] == document
@@ -370,88 +422,48 @@ class QuestionBankManager:
             )
 
         if not has_pending_tasks:
-            return {
-                "accepted": False,
-                "status": "not_running",
-            }
+            return {"accepted": False, "status": "not_running"}
 
         with self.pause_condition:
             self.paused_documents.add(document)
-
             if document not in self.pause_acknowledged:
                 status = "pausing"
             else:
                 status = "paused"
-
             self.pause_condition.notify_all()
 
-        print(
-            f"[WebIA] Pause demandée pour {document} ({status})."
-        )
-
-        return {
-            "accepted": True,
-            "status": status,
-        }
+        print(f"[WebIA] Pause demandée pour {document} ({status}).")
+        return {"accepted": True, "status": status}
 
     def resume_document_tasks(self, document: str):
-        """Remet en file les tâches suspendues lors de la reprise."""
+        """Reprogramme les tâches mises en pause, sans perdre les questions."""
         document = str(document)
-
         with self.pause_condition:
             was_paused = document in self.paused_documents
-
             self.paused_documents.discard(document)
             self.pause_acknowledged.discard(document)
             self.pause_condition.notify_all()
 
-        # Récupérer les tâches suspendues sans les dupliquer.
         with self.paused_tasks_lock:
-            tasks_to_resume = self.paused_tasks.pop(
-                document,
-                {},
-            )
+            tasks_to_resume = [task for task in self.paused_tasks if task[0] == document]
+            for task in tasks_to_resume:
+                self.paused_tasks.discard(task)
 
-        resumed_count = 0
-
-        for task_key, task in tasks_to_resume.items():
-            if self.stop_event.is_set():
-                # Si le worker est arrêté, conserver les tâches en attente.
-                with self.paused_tasks_lock:
-                    self.paused_tasks.setdefault(
-                        document,
-                        {},
-                    )[task_key] = task
-                continue
-
-            if self._get_task_status_value(task_key) == "cancelled":
+        for task in tasks_to_resume:
+            task_key = self._make_task_key(*task)
+            if self.is_task_cancelled(task_key):
                 with self.pending_tasks_lock:
                     self.pending_tasks.discard(task_key)
                 continue
-
-            self._set_task_status(
-                task_key,
-                "queued",
-            )
-
+            self._set_task_status(task_key, "queued")
             self.task_queue.put(task)
-            resumed_count += 1
 
-        print(
-            "[WebIA] Reprise demandée pour "
-            f"{document} ; tâches réactivées : {resumed_count}."
-        )
-
-        return {
-            "resumed": was_paused or resumed_count > 0,
-            "status": "running" if not self.stop_event.is_set() else "stopped",
-            "queued": resumed_count,
-        }
+        print(f"[WebIA] Reprise demandée pour {document}.")
+        return {"resumed": was_paused, "requeued_count": len(tasks_to_resume), "status": "running"}
 
     def get_document_pause_status(self, document: str):
         """Retourne l'état de pause utilisé par l'API et le flux SSE."""
         document = str(document)
-
         with self.pause_condition:
             paused = document in self.paused_documents
             acknowledged = document in self.pause_acknowledged
@@ -466,30 +478,19 @@ class QuestionBankManager:
             ),
         }
 
-    def wait_if_document_paused(
-        self,
-        document: str,
-        task_key=None,
-    ):
-        """Interrompt la tâche au prochain point sûr si le PDF est en pause."""
+    def wait_if_document_paused(self, document: str, task_key=None):
+        """Signale une pause aux points sûrs pour différer la tâche du worker."""
         document = str(document)
-
         with self.pause_condition:
             if document not in self.paused_documents:
                 return
-
             self.pause_acknowledged.add(document)
             self.pause_condition.notify_all()
 
-        if task_key is not None:
-            self._set_task_status(
-                task_key,
-                "paused",
-            )
+        if task_key is not None and self.is_task_cancelled(task_key):
+            raise GenerationCancelled("La génération a été annulée.")
 
-        # L'exception permet au worker de libérer sa place.
-        # La tâche sera conservée hors de la file active.
-        raise GenerationPaused(document)
+        raise GenerationPaused("Pause manuelle demandée.")
 
     # --------------------------------------------------------
     # Une banque : document + catégorie + difficulté
@@ -555,11 +556,10 @@ class QuestionBankManager:
             continue_callback=lambda: self._document_exists(document),
             pause_callback=lambda: self.wait_if_document_paused(
                 document,
-                self._make_task_key(
-                    document,
-                    category_id,
-                    difficulty,
-                ),
+                self._make_task_key(document, category_id, difficulty),
+            ),
+            cancel_callback=lambda: self.is_task_cancelled(
+                self._make_task_key(document, category_id, difficulty),
             ),
         )
 
@@ -616,10 +616,7 @@ class QuestionBankManager:
 
         # Une catégorie ne peut pas dépasser 50 questions par difficulté.
         # La capacité dépend aussi du nombre de chunks classifiés disponibles.
-        target = min(
-            TARGET_QUESTION_COUNT,
-            capacity,
-        )
+        target = min(TARGET_QUESTION_COUNT, capacity)
 
         return {
             "category_id": category_id,
@@ -652,21 +649,13 @@ class QuestionBankManager:
 
         with self.pending_tasks_lock:
             if task_key in self.pending_tasks:
-                print(
-                    f"[WebIA] Tâche déjà en attente : {task_key}"
-                )
+                print(f"[WebIA] Tâche déjà en attente : {task_key}")
                 return False
 
             self.pending_tasks.add(task_key)
 
-        self._set_task_status(
-            task_key,
-            "queued",
-        )
-
-        self.task_queue.put(
-            (document, category_id, difficulty)
-        )
+        self._set_task_status(task_key, "queued")
+        self.task_queue.put((document, category_id, difficulty))
 
         print(
             "[WebIA] Tâche ajoutée : "
@@ -712,7 +701,7 @@ class QuestionBankManager:
         category_id: int,
         difficulty: str,
     ):
-        """Vérifie l'état PostgreSQL puis met une tâche en file si nécessaire."""
+        """Vérifie l'état dans PostgreSQL puis met une tâche en file si nécessaire."""
         status = self.get_category_difficulty_status(
             document=document,
             category_id=category_id,

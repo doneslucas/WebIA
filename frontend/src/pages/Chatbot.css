@@ -1,3 +1,4 @@
+
 html,
 body,
 #root {
@@ -9,7 +10,7 @@ body,
 .chatbot-page {
   width: 100%;
   height: 100vh;
-  background: #f5f7fa;
+  background: transparent;
   padding: 30px;
   box-sizing: border-box;
   overflow: hidden;
@@ -166,6 +167,14 @@ body,
 .chatbot-input-container button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Texte de progression du chatbot */
+.loading-status-text {
+  font-size: 10px;
+  line-height: 1.3;
+  margin: 3px 0 6px;
+  font-weight: normal;
 }
 
 .loading {

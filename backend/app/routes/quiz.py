@@ -1,6 +1,7 @@
 from collections import defaultdict
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.auth import verify_token
@@ -57,6 +58,10 @@ class MixedQuizGenerationRequest(BaseModel):
 class QuizQuestionGenerationRequest(BaseModel):
     category_ids: list[int] = Field(min_length=1)
     difficulty: str
+
+
+class QuizGenerationCancelRequest(BaseModel):
+    generation_id: str = Field(min_length=1, max_length=100)
 
 
 class QuizAnswer(BaseModel):
@@ -377,6 +382,32 @@ def generate_quiz_route(
     validate_difficulty(request.difficulty)
 
     try:
+        # Vérifier qu'au moins un chunk est associé aux catégories sélectionnées.
+        with get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM document_chunks
+                    WHERE category_id = ANY(%s)
+                    """,
+                    (request.category_ids,),
+                )
+                chunk_count = cursor.fetchone()[0]
+
+        if chunk_count == 0:
+            return {
+                "status": "no_source_content",
+                "category_ids": request.category_ids,
+                "difficulty": request.difficulty,
+                "message": (
+                    "Impossible de générer des questions pour cette catégorie : "
+                    "aucun passage des documents indexés n'y est actuellement "
+                    "associé. Importez un PDF qui traite de ce sujet, puis "
+                    "relancez le quiz."
+                ),
+            }
+
         return generate_quiz(
             question_count=request.question_count,
             difficulty=request.difficulty,
@@ -483,6 +514,7 @@ def request_quiz_question_generation(
 
     validate_category_ids(request.category_ids)
     validate_difficulty(request.difficulty)
+    generation_id = str(uuid4())
 
     try:
         documents = get_documents_by_selected_categories(
@@ -522,6 +554,14 @@ def request_quiz_question_generation(
                     difficulty=request.difficulty,
                 )
 
+                question_bank_manager.register_generation_request(
+                    request_id=generation_id,
+                    document=document,
+                    category_id=category_id,
+                    difficulty=request.difficulty,
+                    task_created=bool(result.get("queued")),
+                )
+
                 if result.get("queued"):
                     new_tasks += 1
 
@@ -547,6 +587,7 @@ def request_quiz_question_generation(
             if completed_tasks > 0 and incomplete_tasks == 0:
                 return {
                     "status": "completed",
+                    "generation_id": generation_id,
                     "category_ids": request.category_ids,
                     "difficulty": request.difficulty,
                     "queued_count": 0,
@@ -561,6 +602,7 @@ def request_quiz_question_generation(
 
             return {
                 "status": "no_new_tasks",
+                "generation_id": generation_id,
                 "category_ids": request.category_ids,
                 "difficulty": request.difficulty,
                 "queued_count": 0,
@@ -583,6 +625,7 @@ def request_quiz_question_generation(
 
         return {
             "status": "queued",
+            "generation_id": generation_id,
             "category_ids": request.category_ids,
             "difficulty": request.difficulty,
             "queued_count": new_tasks,
@@ -622,11 +665,50 @@ def request_quiz_question_generation(
 # Statut de génération
 # -------------------------------------------------
 
+
+
+
+
+@router.post("/release-generation")
+def release_quiz_question_generation(
+    request: QuizGenerationCancelRequest,
+    payload: dict = Depends(verify_token),
+):
+    """Libère la demande du quiz sans arrêter la génération en arrière-plan."""
+    get_authenticated_user_id(payload)
+    result = question_bank_manager.release_generation_request(
+        request.generation_id,
+    )
+    return {
+        "status": "released",
+        "generation_id": request.generation_id,
+        **result,
+    }
+
+
+@router.post("/cancel-generation")
+def cancel_quiz_question_generation(
+    request: QuizGenerationCancelRequest,
+    payload: dict = Depends(verify_token),
+):
+    """Annule uniquement les tâches appartenant à cette demande de quiz."""
+    get_authenticated_user_id(payload)
+    result = question_bank_manager.cancel_generation_request(
+        request.generation_id,
+    )
+    return {
+        "status": "cancelled",
+        "generation_id": request.generation_id,
+        **result,
+        "questions_preserved": True,
+    }
+
+
 @router.get("/generation-status")
 def quiz_generation_status_route(
-    category_ids: list[int],
-    difficulty: str,
-    requested_count: int,
+    category_ids: list[int] = Query(...),
+    difficulty: str = Query(...),
+    requested_count: int = Query(...),
     payload: dict = Depends(verify_token),
 ):
     user_id = get_authenticated_user_id(payload)

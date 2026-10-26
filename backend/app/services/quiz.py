@@ -16,6 +16,12 @@ class GenerationPaused(Exception):
     pass
 
 
+class GenerationCancelled(Exception):
+    """Signale une annulation explicite d’une tâche de génération."""
+
+    pass
+
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -1025,15 +1031,22 @@ def generate_questions_for_bank(
     progress_callback=None,
     continue_callback=None,
     pause_callback=None,
+    cancel_callback=None,
 ):
     validate_difficulty(difficulty)
     category_ids = validate_category_ids(category_ids)
     document_ids = get_documents_scope(document)
     category_sql, category_params = get_category_filter_sql(category_ids)
 
+    def check_cancellation():
+        if cancel_callback is not None and cancel_callback():
+            raise GenerationCancelled("La génération a été annulée.")
+
     def wait_for_manual_resume():
+        check_cancellation()
         if pause_callback is not None:
             pause_callback()
+        check_cancellation()
 
     with get_connection() as conn:
         with conn.cursor() as cursor:
@@ -1090,6 +1103,8 @@ def generate_questions_for_bank(
         for chunk in chunks:
             wait_for_manual_resume()
             task_manager.wait_for_background_permission()
+
+            check_cancellation()
 
             if continue_callback is not None and not continue_callback():
                 print(
@@ -1161,8 +1176,12 @@ def generate_questions_for_bank(
                     batch_size=batch_size,
                 )
 
-                # Si la pause est demandée pendant l'appel au LLM,
-                # le lot reste en mémoire jusqu'à la reprise.
+                # Une annulation pendant l’appel au LLM est appliquée dès
+                # que le modèle répond ; le lot non sauvegardé est abandonné.
+                check_cancellation()
+
+                # Si une pause est demandée pendant l’appel au LLM,
+                # le lot reste en mémoire jusqu’à la reprise.
                 wait_for_manual_resume()
                 task_manager.wait_for_background_permission()
 
@@ -1205,6 +1224,10 @@ def generate_questions_for_bank(
                         f"Chunk {chunk_id} ignoré : aucune question sauvegardée "
                         "(doublons ou limite atteinte)."
                     )
+
+            except GenerationCancelled:
+                # Les questions déjà sauvegardées restent intactes.
+                raise
 
             except GenerationPaused:
                 # Une pause n'est pas un échec du chunk.

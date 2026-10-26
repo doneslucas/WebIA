@@ -1,6 +1,8 @@
 import {
   createContext,
   useContext,
+  useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -163,20 +165,25 @@ function formatEstimatedTime(
   const totalSeconds = Math.ceil(seconds);
 
   if (totalSeconds < 60) {
-    return `environ ${totalSeconds} seconde(s)`;
+    return totalSeconds === 1
+      ? "environ 1 seconde"
+      : `environ ${totalSeconds} secondes`;
   }
 
   const minutes = Math.ceil(totalSeconds / 60);
 
   if (minutes < 60) {
-    return `environ ${minutes} minute(s)`;
+    return minutes === 1
+      ? "environ 1 minute"
+      : `environ ${minutes} minutes`;
   }
 
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
+  const hourLabel = hours === 1 ? "heure" : "heures";
 
   if (remainingMinutes === 0) {
-    return `environ ${hours} heure(s)`;
+    return `environ ${hours} ${hourLabel}`;
   }
 
   return `environ ${hours} h ${remainingMinutes} min`;
@@ -186,6 +193,41 @@ function formatEstimatedTime(
 export function QuizProvider({
   children,
 }: QuizProviderProps) {
+  const waitOperationId = useRef(0);
+  const generationIdRef = useRef<string | null>(null);
+
+  async function callGenerationAction(
+    action: "cancel-generation" | "release-generation",
+    generationId: string,
+  ): Promise<void> {
+    const accessToken = localStorage.getItem("access_token");
+
+    try {
+      const response = await fetch(
+        "http://127.0.0.1:8000/quiz/" + action,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(accessToken
+              ? { Authorization: `Bearer ${accessToken}` }
+              : {}),
+          },
+          body: JSON.stringify({ generation_id: generationId }),
+        },
+      );
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        console.error(
+          `[Quiz] ${action} refusée :`,
+          body.detail || response.statusText,
+        );
+      }
+    } catch (error) {
+      console.error(`[Quiz] Erreur ${action} :`, error);
+    }
+  }
   const [categoryIds, setCategoryIds] =
     useState<number[]>([]);
 
@@ -249,6 +291,19 @@ export function QuizProvider({
     waitingForGeneration,
     setWaitingForGeneration,
   ] = useState(false);
+
+  // Informe la barre de navigation lorsqu'un QCM est réellement en cours.
+  useEffect(() => {
+    const quizIsActive = quizStarted && !finished;
+
+    if (quizIsActive) {
+      localStorage.setItem("webia_quiz_active", "true");
+    } else {
+      localStorage.removeItem("webia_quiz_active");
+    }
+
+    window.dispatchEvent(new Event("webia-quiz-state-change"));
+  }, [quizStarted, finished]);
 
 
   function initializeQuiz(
@@ -329,6 +384,15 @@ export function QuizProvider({
           result.data.detail ||
           "Erreur lors de la préparation du quiz.",
         );
+      }
+
+      if (result.data.status === "no_source_content") {
+        setGenerationChoice(null);
+        setMessage(
+          result.data.message ||
+            "Les documents indexés ne contiennent actuellement aucun passage associé à cette catégorie. Importez un PDF pertinent, puis réessayez.",
+        );
+        return;
       }
 
       if (result.data.status === "insufficient_questions") {
@@ -579,6 +643,9 @@ export function QuizProvider({
   // -------------------------------------------------
 
   async function waitForQuestions() {
+    const operationId = ++waitOperationId.current;
+    generationIdRef.current = null;
+
     if (!generationChoice) {
       return;
     }
@@ -597,21 +664,117 @@ export function QuizProvider({
       return;
     }
 
+    const requestedCount = Number(questionCount);
+    const initialAvailableCount = Math.max(
+      0,
+      Number(generationChoice.available_count ?? 0),
+    );
+    const initialMissingCount = Math.max(
+      0,
+      requestedCount - initialAvailableCount,
+    );
+    const estimateStartedAt = Date.now();
+
+    type BankProgress = {
+      current: number;
+      target: number;
+    };
+
+    let initialBankCurrent: number | null = null;
+    let latestBankCurrent: number | null = null;
+    let initialBankTarget: number | null = null;
+    let bankProgressAvailable = false;
+    let estimatedQuestionsToGenerate = initialMissingCount;
+
+    /*
+     * La progression de la banque est différente du nombre de questions
+     * encore jouables par l'utilisateur : les questions déjà jouées restent
+     * dans la banque, mais ne sont plus comptées comme disponibles.
+     * Cet appel est volontairement facultatif : une erreur de statut ne doit
+     * jamais interrompre le lancement ou le suivi de la génération.
+     */
+    async function readBankProgress(): Promise<BankProgress | null> {
+      try {
+        const result = await getQuizGenerationStatus(
+          categoryIds,
+          requestedCount,
+          difficulty,
+        );
+
+        if (!result.response.ok) {
+          return null;
+        }
+
+        const data = result.data as {
+          categories?: Record<
+            string,
+            Record<string, { current?: number; target?: number }>
+          >;
+          status?: Record<string, { current?: number; target?: number }>;
+        };
+
+        const categoryStatuses = categoryIds.map(
+          (categoryId) => data.categories?.[String(categoryId)]?.[difficulty],
+        );
+
+        const completeCategoryStatuses = categoryStatuses.filter(
+          (entry): entry is { current: number; target: number } =>
+            Boolean(
+              entry &&
+              typeof entry.current === "number" &&
+              Number.isFinite(entry.current) &&
+              typeof entry.target === "number" &&
+              Number.isFinite(entry.target),
+            ),
+        );
+
+        if (
+          completeCategoryStatuses.length === categoryIds.length &&
+          completeCategoryStatuses.length > 0
+        ) {
+          return {
+            current: completeCategoryStatuses.reduce(
+              (total, entry) => total + entry.current,
+              0,
+            ),
+            target: completeCategoryStatuses.reduce(
+              (total, entry) => total + entry.target,
+              0,
+            ),
+          };
+        }
+
+        const aggregateStatus = data.status?.[difficulty];
+
+        if (
+          typeof aggregateStatus?.current === "number" &&
+          Number.isFinite(aggregateStatus.current) &&
+          typeof aggregateStatus.target === "number" &&
+          Number.isFinite(aggregateStatus.target)
+        ) {
+          return {
+            current: aggregateStatus.current,
+            target: aggregateStatus.target,
+          };
+        }
+      } catch {
+        // Le suivi de statut ne doit pas interrompre la génération.
+      }
+
+      return null;
+    }
+
     setWaitingForGeneration(true);
     setLoading(true);
     setMessage("Demande de génération des questions...");
 
+    let keepStopAvailable = false;
+
     try {
-      /*
-       * L'option 3 ne se contente pas d'attendre :
-       * elle demande au backend de mettre en file les tâches
-       * nécessaires pour les catégories et la difficulté choisies.
-       */
-      const requestResult =
-        await requestQuizQuestionGeneration(
-          categoryIds,
-          difficulty,
-        );
+      const requestResult = await requestQuizQuestionGeneration(
+        categoryIds,
+        difficulty,
+      );
 
       if (!requestResult.response.ok) {
         throw new Error(
@@ -620,60 +783,114 @@ export function QuizProvider({
         );
       }
 
-      const estimatedTime =
-        formatEstimatedTime(
-          requestResult.data.estimated_seconds,
+      const generationId =
+        typeof requestResult.data.generation_id === "string"
+          ? requestResult.data.generation_id
+          : null;
+      generationIdRef.current = generationId;
+
+      // Stop peut avoir été cliqué pendant la requête initiale.
+      if (operationId !== waitOperationId.current) {
+        if (generationId) {
+          await callGenerationAction("cancel-generation", generationId);
+        }
+        return;
+      }
+
+      // Capture l'état de la banque après la mise en file. Cet appel est
+      // facultatif et ne peut pas faire échouer l'option 3.
+      const baselineProgress = await readBankProgress();
+
+      if (operationId !== waitOperationId.current) {
+        if (generationId) {
+          await callGenerationAction("cancel-generation", generationId);
+        }
+        return;
+      }
+
+      if (baselineProgress) {
+        initialBankCurrent = baselineProgress.current;
+        latestBankCurrent = baselineProgress.current;
+        initialBankTarget = baselineProgress.target;
+        bankProgressAvailable = true;
+
+        const remainingBankCapacity = Math.max(
+          0,
+          baselineProgress.target - baselineProgress.current,
         );
 
-      if (estimatedTime) {
+        // On ne prévoit pas plus de questions que la banque ne peut encore
+        // en produire, même si davantage sont manquantes pour le quiz.
+        estimatedQuestionsToGenerate = Math.min(
+          initialMissingCount,
+          remainingBankCapacity,
+        );
+      }
+
+      const backendEstimatedSeconds =
+        typeof requestResult.data.estimated_seconds === "number" &&
+        Number.isFinite(requestResult.data.estimated_seconds) &&
+        requestResult.data.estimated_seconds > 0
+          ? Math.ceil(requestResult.data.estimated_seconds)
+          : null;
+
+      const estimatedSeconds = estimatedQuestionsToGenerate * 2 * 60;
+      const estimatedTime = formatEstimatedTime(estimatedSeconds);
+
+      if (initialMissingCount === 0) {
         setMessage(
-          `Génération demandée. Temps estimé par le serveur : ${estimatedTime}.`,
+          "Toutes les questions demandées semblent disponibles. Préparation du quiz...",
+        );
+      } else if (
+        bankProgressAvailable &&
+        estimatedQuestionsToGenerate === 0 &&
+        initialBankCurrent !== null &&
+        initialBankTarget !== null &&
+        initialBankCurrent >= initialBankTarget
+      ) {
+        setMessage(
+          "La banque a atteint sa capacité actuelle : aucune nouvelle question n'est prévue pour cette sélection. Vérification des questions jouables...",
         );
       } else {
         setMessage(
-          "Génération demandée. Recherche des nouvelles questions en cours...",
+          `Génération demandée. Temps estimé : ${estimatedTime} ` +
+          "(2 minutes par question à produire).",
         );
       }
 
       /*
-       * Limite d'attente : 20 minutes.
-       * Une demande de génération peut concerner plusieurs catégories.
-       * Chaque contrôle vérifie les questions réellement utilisables
-       * par l'utilisateur, et non uniquement le total de la banque.
+       * Le délai maximal reste une sécurité technique. Il ne contrôle pas
+       * l'estimation affichée à l'utilisateur.
        */
-      const maxAttempts = 400;
+      const maxWaitSeconds = Math.min(
+        90 * 60,
+        Math.max(
+          20 * 60,
+          (backendEstimatedSeconds ?? estimatedSeconds ?? 15 * 60) + 5 * 60,
+        ),
+      );
+      const maxAttempts = Math.ceil(maxWaitSeconds / 5);
       let idleChecks = 0;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         await new Promise<void>((resolve) => {
-          window.setTimeout(resolve, 3000);
+          window.setTimeout(resolve, 5000);
         });
 
-        const statusResult =
-          await getQuizGenerationStatus(
-            categoryIds,
-            Number(questionCount),
-            difficulty,
-          );
-
-        if (!statusResult.response.ok) {
-          throw new Error(
-            statusResult.data.detail ||
-            "Impossible de suivre la progression de la génération.",
-          );
+        if (operationId !== waitOperationId.current) {
+          return;
         }
 
-        /*
-         * On tente de préparer le quiz à chaque vérification.
-         * C'est le backend /quiz/generate qui détermine si suffisamment
-         * de questions non encore jouées sont désormais disponibles.
-         */
         const quizResult = await generateQuiz(
           categoryIds,
-          Number(questionCount),
+          requestedCount,
           difficulty,
           false,
         );
+
+        if (operationId !== waitOperationId.current) {
+          return;
+        }
 
         if (!quizResult.response.ok) {
           throw new Error(
@@ -685,7 +902,7 @@ export function QuizProvider({
         if (quizResult.data.status === "ready") {
           if (
             !Array.isArray(quizResult.data.questions) ||
-            quizResult.data.questions.length !== Number(questionCount)
+            quizResult.data.questions.length !== requestedCount
           ) {
             throw new Error(
               "Le serveur n'a pas retourné le nombre de questions attendu.",
@@ -701,6 +918,15 @@ export function QuizProvider({
             );
           }
 
+          if (generationId) {
+            await callGenerationAction("release-generation", generationId);
+          }
+          generationIdRef.current = null;
+
+          if (operationId !== waitOperationId.current) {
+            return;
+          }
+
           initializeQuiz(validQuestions);
           return;
         }
@@ -712,49 +938,110 @@ export function QuizProvider({
           );
         }
 
-        const refreshedChoice =
-          quizResult.data as QuizGenerationData;
-
+        const refreshedChoice = quizResult.data as QuizGenerationData;
         setGenerationChoice(refreshedChoice);
 
-        const bankStatus =
-          statusResult.data.status?.[difficulty];
+        // L'état de la banque est interrogé périodiquement, mais une erreur
+        // sur cet endpoint ne fait jamais arrêter la boucle de génération.
+        if (attempt === 1 || attempt % 3 === 0) {
+          const currentProgress = await readBankProgress();
 
-        const bankCurrent =
-          typeof bankStatus?.current === "number"
-            ? bankStatus.current
-            : null;
+          if (operationId !== waitOperationId.current) {
+            return;
+          }
 
-        const bankTarget =
-          typeof bankStatus?.target === "number"
-            ? bankStatus.target
-            : null;
+          if (currentProgress) {
+            if (initialBankCurrent === null) {
+              // Si le premier état fiable n'arrive qu'en cours de route,
+              // on conserve l'avancement estimé depuis le lancement.
+              const elapsedQuestionSlots = Math.floor(
+                (Date.now() - estimateStartedAt) / (2 * 60 * 1000),
+              );
+              const inferredCompleted = Math.min(
+                initialMissingCount,
+                elapsedQuestionSlots,
+              );
+
+              initialBankCurrent = currentProgress.current - inferredCompleted;
+              initialBankTarget = currentProgress.target;
+              estimatedQuestionsToGenerate = Math.min(
+                initialMissingCount,
+                Math.max(0, initialBankTarget - initialBankCurrent),
+              );
+            }
+
+            latestBankCurrent = currentProgress.current;
+            if (initialBankTarget === null) {
+              initialBankTarget = currentProgress.target;
+            }
+            bankProgressAvailable = true;
+          }
+        }
 
         const availableForUser =
           typeof refreshedChoice.available_count === "number"
             ? refreshedChoice.available_count
             : 0;
 
-        const generationActive =
-          Boolean(
-            statusResult.data.generation_active ??
-            statusResult.data.active ??
-            statusResult.data.status?.[difficulty]?.generation_active ??
-            refreshedChoice.generation_active ??
-            refreshedChoice.options.wait.generation_active,
-          );
+        const generationActive = Boolean(
+          refreshedChoice.generation_active ??
+          refreshedChoice.options.wait.generation_active,
+        );
 
-        if (bankCurrent !== null && bankTarget !== null) {
-          setMessage(
-            `Questions utilisables par toi : ${availableForUser} / ${Number(questionCount)}. ` +
-            `Banque : ${bankCurrent} / ${bankTarget}.`,
-          );
+        // Nombre de nouvelles questions produites d'après le compteur de la
+        // banque. Si ce statut n'est pas accessible, on garde une estimation
+        // de deux minutes par question au lieu de bloquer le compteur à zéro
+        // simplement parce que l'utilisateur a déjà joué toutes ses questions.
+        const elapsedQuestionSlots = Math.floor(
+          (Date.now() - estimateStartedAt) / (2 * 60 * 1000),
+        );
+        const generatedByBank =
+          initialBankCurrent !== null && latestBankCurrent !== null
+            ? Math.max(0, latestBankCurrent - initialBankCurrent)
+            : 0;
+        const estimatedCompletedQuestions = Math.min(
+          estimatedQuestionsToGenerate,
+          bankProgressAvailable
+            ? generatedByBank
+            : elapsedQuestionSlots,
+        );
+        const estimateRemainingQuestions = Math.max(
+          0,
+          estimatedQuestionsToGenerate - estimatedCompletedQuestions,
+        );
+        const estimateRemainingSeconds = estimateRemainingQuestions * 2 * 60;
+        const actualMissingCount = Math.max(
+          0,
+          requestedCount - availableForUser,
+        );
+
+        let estimateMessage: string;
+        if (estimatedQuestionsToGenerate === 0) {
+          estimateMessage =
+            bankProgressAvailable &&
+            initialBankCurrent !== null &&
+            initialBankTarget !== null &&
+            initialBankCurrent >= initialBankTarget
+              ? "La banque a atteint sa capacité prévue : aucune autre question ne peut être ajoutée automatiquement pour cette sélection."
+              : "Aucune question supplémentaire n'est actuellement prévue pour cette génération.";
+        } else if (estimateRemainingQuestions === 0) {
+          estimateMessage =
+            "L'estimation est écoulée ; vérification de la disponibilité des questions.";
         } else {
-          setMessage(
-            `Questions utilisables par toi : ${availableForUser} / ${Number(questionCount)}. ` +
-            "Génération et disponibilité vérifiées régulièrement.",
-          );
+          estimateMessage =
+            `Estimation restante : ${formatEstimatedTime(estimateRemainingSeconds)} ` +
+            "(2 minutes par question estimée restante).";
         }
+
+        const progressMessage = bankProgressAvailable
+          ? `Progression de la banque : ${Math.min(estimatedQuestionsToGenerate, generatedByBank)}/${estimatedQuestionsToGenerate} nouvelle(s) question(s) enregistrée(s).`
+          : `Estimation indicative : ${estimatedCompletedQuestions}/${estimatedQuestionsToGenerate} question(s) estimée(s) produite(s).`;
+
+        setMessage(
+          `Questions utilisables : ${availableForUser}/${requestedCount}. ` +
+          `${actualMissingCount} question(s) encore nécessaire(s) pour ton quiz. ` +
+          `${progressMessage} ${estimateMessage}`,
+        );
 
         if (generationActive) {
           idleChecks = 0;
@@ -762,13 +1049,16 @@ export function QuizProvider({
           idleChecks += 1;
         }
 
-        /*
-         * Deux contrôles consécutifs sans tâche active signifient
-         * que la génération demandée semble terminée.
-         * On ne prétend pas que des questions supplémentaires arriveront
-         * si le backend n'a plus de tâches à traiter.
-         */
         if (idleChecks >= 2) {
+          if (generationId) {
+            await callGenerationAction("release-generation", generationId);
+          }
+          generationIdRef.current = null;
+
+          if (operationId !== waitOperationId.current) {
+            return;
+          }
+
           setMessage(
             availableForUser > 0
               ? `La génération est terminée. Il reste ${availableForUser} question(s) jouable(s) pour toi. Tu peux choisir un quiz plus court ou revenir à la configuration.`
@@ -779,23 +1069,51 @@ export function QuizProvider({
         }
       }
 
+      // Le suivi s'arrête, mais on garde l'identifiant pour que Stop puisse
+      // encore annuler la génération si elle continue en arrière-plan.
+      keepStopAvailable = Boolean(generationIdRef.current);
       setMessage(
-        "La génération n'est pas terminée après 20 minutes. Les questions déjà enregistrées sont conservées ; tu peux réessayer ou choisir une autre option.",
+        "Le délai de suivi est dépassé. Les questions déjà enregistrées sont conservées. La génération peut encore tourner en arrière-plan ; utilise Stop pour l'annuler.",
       );
     } catch (error) {
-      handleGenerationError(
-        error,
-        "Erreur lors de la demande ou du suivi de génération.",
-      );
+      if (operationId === waitOperationId.current) {
+        if (generationIdRef.current) {
+          keepStopAvailable = true;
+          setMessage(
+            `${getErrorMessage(error, "Erreur lors du suivi de génération.")} La tâche peut continuer en arrière-plan ; le bouton Stop reste disponible pour l'annuler. Les questions déjà enregistrées sont conservées.`,
+          );
+        } else {
+          handleGenerationError(
+            error,
+            "Erreur lors de la demande ou du suivi de génération.",
+          );
+        }
+      }
     } finally {
-      setLoading(false);
-      setWaitingForGeneration(false);
+      if (operationId === waitOperationId.current) {
+        setLoading(false);
+        if (!keepStopAvailable) {
+          setWaitingForGeneration(false);
+        }
+      }
     }
   }
 
-
   function cancelGenerationChoice() {
     if (waitingForGeneration) {
+      // Invalide immédiatement la boucle de suivi côté interface.
+      waitOperationId.current += 1;
+      const generationId = generationIdRef.current;
+      generationIdRef.current = null;
+      if (generationId) {
+        void callGenerationAction("cancel-generation", generationId);
+      }
+      setWaitingForGeneration(false);
+      setLoading(false);
+      setGenerationChoice(null);
+      setMessage(
+        "Annulation demandée. Les questions déjà enregistrées sont conservées.",
+      );
       return;
     }
 
@@ -948,6 +1266,15 @@ export function QuizProvider({
   // -------------------------------------------------
 
   function returnToQuizHome() {
+    if (waitingForGeneration) {
+      waitOperationId.current += 1;
+      const generationId = generationIdRef.current;
+      generationIdRef.current = null;
+      if (generationId) {
+        void callGenerationAction("cancel-generation", generationId);
+      }
+    }
+
     setQuizStarted(false);
     setCurrentQuestion(0);
     setAnswers([]);
