@@ -231,7 +231,13 @@ class QuestionBankManager:
                         for key in self.pending_tasks
                     )
 
-                if not document_still_pending:
+                with self.paused_tasks_lock:
+                    document_has_paused_tasks = any(
+                        task[0] == document
+                        for task in self.paused_tasks
+                    )
+
+                if not document_still_pending and not document_has_paused_tasks:
                     with self.pause_condition:
                         self.paused_documents.discard(document)
                         self.pause_acknowledged.discard(document)
@@ -459,7 +465,11 @@ class QuestionBankManager:
             self.task_queue.put(task)
 
         print(f"[WebIA] Reprise demandée pour {document}.")
-        return {"resumed": was_paused, "requeued_count": len(tasks_to_resume), "status": "running"}
+        return {
+            "resumed": was_paused or bool(tasks_to_resume),
+            "requeued_count": len(tasks_to_resume),
+            "status": "running",
+        }
 
     def get_document_pause_status(self, document: str):
         """Retourne l'état de pause utilisé par l'API et le flux SSE."""

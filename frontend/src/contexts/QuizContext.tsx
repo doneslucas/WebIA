@@ -16,6 +16,7 @@ import {
   submitQuiz,
 } from "../services/api";
 
+import API_URL from "../services/apiConfig";
 
 export type QuizQuestion = {
   id: number;
@@ -204,7 +205,7 @@ export function QuizProvider({
 
     try {
       const response = await fetch(
-        "http://127.0.0.1:8000/quiz/" + action,
+        `${API_URL}/quiz/${action}`,
         {
           method: "POST",
           headers: {

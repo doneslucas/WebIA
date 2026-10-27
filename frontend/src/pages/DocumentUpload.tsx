@@ -21,6 +21,7 @@ import {
 } from "../services/api";
 
 import "./DocumentUpload.css";
+import API_URL from "../services/apiConfig";
 
 type DifficultyProgress = {
   status: string;
@@ -68,7 +69,6 @@ type GenerationProgress = {
 
 const ACTIVE_DOCUMENT_KEY = "webia_active_document";
 const ACTIVE_PROGRESS_KEY = "webia_active_document_progress";
-const API_URL = "http://127.0.0.1:8000";
 
 const ACTIVE_PROCESSING_STATUSES = [
   "pending",
@@ -290,6 +290,49 @@ function DifficultyProgressBar({
       </div>
     </div>
   );
+}
+
+function isClassificationStillRunning(
+  progress: GenerationProgress | null | undefined,
+): boolean {
+  if (!progress) {
+    return false;
+  }
+
+  const percentage = Number(
+    progress.indexing?.progress ?? progress.indexing_progress ?? 0,
+  );
+
+  return (
+    progress.indexing?.status === "indexing" ||
+    (
+      progress.indexing?.stage === "categories" &&
+      Number.isFinite(percentage) &&
+      percentage < 100
+    )
+  );
+}
+
+function waitBeforeReconnect(signal: AbortSignal, delayMs: number) {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      signal.removeEventListener("abort", handleAbort);
+      resolve();
+    }, delayMs);
+
+    function handleAbort() {
+      window.clearTimeout(timeoutId);
+      signal.removeEventListener("abort", handleAbort);
+      resolve();
+    }
+
+    signal.addEventListener("abort", handleAbort, { once: true });
+  });
 }
 
 function DocumentUpload() {
@@ -569,7 +612,10 @@ function DocumentUpload() {
 
     const status = progress.status;
 
-    if (status === "waiting_manual") {
+    if (
+      status === "waiting_manual" &&
+      !isClassificationStillRunning(progress)
+    ) {
       setMessage(
         `${progress.document} : document indexé. ` +
           "Cliquez sur « Générer les questions » pour lancer la génération.",
@@ -636,36 +682,72 @@ function DocumentUpload() {
     saveActiveDocument(filename);
 
     try {
-      await streamDocumentProgress<GenerationProgress>(
-        filename,
-        (progress) => {
-          if (!controller.signal.aborted) {
-            handleProgressUpdate(progress);
+      while (!controller.signal.aborted) {
+        try {
+          await streamDocumentProgress<GenerationProgress>(
+            filename,
+            (progress) => {
+              if (!controller.signal.aborted) {
+                handleProgressUpdate(progress);
+              }
+            },
+            controller.signal,
+          );
+        } catch (error) {
+          if (
+            controller.signal.aborted ||
+            (
+              error instanceof DOMException &&
+              error.name === "AbortError"
+            )
+          ) {
+            return;
           }
-        },
-        controller.signal,
-      );
-    } catch (error) {
-      if (
-        error instanceof DOMException &&
-        error.name === "AbortError"
-      ) {
-        return;
+
+          console.warn(
+            `Flux SSE interrompu pour ${filename}. Nouvelle tentative en cours.`,
+            error,
+          );
+        }
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        // Le SSE peut se fermer lorsque le navigateur suspend l'onglet.
+        // Relire l'état serveur avant de rouvrir le flux.
+        try {
+          const { response, data } = await getGenerationProgress(filename);
+
+          if (controller.signal.aborted) {
+            return;
+          }
+
+          if (response.ok) {
+            handleProgressUpdate(data as GenerationProgress);
+
+            // Une pause ou un statut terminal peut arrêter le suivi.
+            if (controller.signal.aborted) {
+              return;
+            }
+          }
+        } catch (error) {
+          if (controller.signal.aborted) {
+            return;
+          }
+
+          console.warn(
+            `Impossible de rafraîchir la progression de ${filename}.`,
+            error,
+          );
+        }
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        await waitBeforeReconnect(controller.signal, 2500);
       }
-
-      if (controller.signal.aborted) {
-        return;
-      }
-
-      console.error(
-        `Erreur du flux SSE pour ${filename} :`,
-        error,
-      );
-
-      setMessage(
-        `Le suivi en temps réel de ${filename} a été interrompu. ` +
-          "La progression enregistrée est conservée.",
-      );
     } finally {
       if (streamControllerRef.current === controller) {
         streamControllerRef.current = null;
@@ -758,7 +840,10 @@ function DocumentUpload() {
           return;
         }
 
-        if (ACTIVE_PROCESSING_STATUSES.includes(progress.status)) {
+        if (
+          ACTIVE_PROCESSING_STATUSES.includes(progress.status) ||
+          isClassificationStillRunning(progress)
+        ) {
           setExternalUploadInProgress(true);
           void startProgressStream(activeDocument);
           return;
@@ -808,7 +893,10 @@ function DocumentUpload() {
           return;
         }
 
-        if (ACTIVE_PROCESSING_STATUSES.includes(progress.status)) {
+        if (
+          ACTIVE_PROCESSING_STATUSES.includes(progress.status) ||
+          isClassificationStillRunning(progress)
+        ) {
           setExternalUploadInProgress(true);
           void startProgressStream(filename);
         } else {
@@ -1272,9 +1360,13 @@ function DocumentUpload() {
     isAdmin &&
     !roleLoading &&
     generationProgress !== null &&
-    generationProgress.indexing?.status === "indexing" &&
-    generationProgress.indexing?.stage === "categories" &&
-    ["pending", "indexing"].includes(generationProgress.status);
+    !["completed", "error", "paused"].includes(
+      generationProgress.status,
+    ) &&
+    (
+      ["pending", "indexing"].includes(generationProgress.status) ||
+      isClassificationStillRunning(generationProgress)
+    );
 
   const rawIndexingPercent = Number(
     generationProgress?.indexing?.progress ??
