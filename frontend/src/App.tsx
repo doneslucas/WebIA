@@ -17,6 +17,7 @@ import Chatbot from "./pages/Chatbot";
 import DocumentUpload from "./pages/DocumentUpload";
 import Progression from "./pages/Progression";
 import Quiz from "./pages/Quiz";
+import About from "./pages/About";
 
 import { QuizProvider } from "./contexts/QuizContext";
 
@@ -88,6 +89,7 @@ function App() {
                 element={<Progression />}
               />
               <Route path="/quiz" element={<Quiz />} />
+              <Route path="/about" element={<About />} />
             </Route>
           </Route>
 

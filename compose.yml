@@ -1,3 +1,4 @@
+
 services:
   frontend:
     build:
@@ -25,6 +26,10 @@ services:
     container_name: webia_backend
     env_file:
       - .env.docker
+    environment:
+      OLLAMA_HOST: ollama
+      OLLAMA_PORT: "11434"
+      CATEGORY_MODEL: qwen2.5:7b
     ports:
       - "8000:8000"
     depends_on:

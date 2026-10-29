@@ -1,3 +1,4 @@
+
 import { useEffect, useState, type MouseEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -95,6 +96,20 @@ function Navbar() {
     return navigationLocked ? "navbar-link-disabled" : undefined;
   }
 
+  function renderNavLink(to: string, label: string) {
+    return (
+      <Link
+        to={to}
+        className={navLinkClassName()}
+        aria-disabled={navigationLocked}
+        tabIndex={navigationLocked ? -1 : undefined}
+        onClick={handleNavigationClick}
+      >
+        {label}
+      </Link>
+    );
+  }
+
   return (
     <nav className="navbar">
       <div className="navbar-logo">
@@ -110,57 +125,14 @@ function Navbar() {
       </div>
 
       <div className="navbar-links">
-        <Link
-          to="/chatbot"
-          className={navLinkClassName()}
-          aria-disabled={navigationLocked}
-          tabIndex={navigationLocked ? -1 : undefined}
-          onClick={handleNavigationClick}
-        >
-          Chatbot
-        </Link>
+        {renderNavLink("/chatbot", "Chatbot")}
+        {renderNavLink("/quiz", "Quiz")}
+        {renderNavLink("/profile", "Profil")}
 
-        <Link
-          to="/quiz"
-          className={navLinkClassName()}
-          aria-disabled={navigationLocked}
-          tabIndex={navigationLocked ? -1 : undefined}
-          onClick={handleNavigationClick}
-        >
-          Quiz
-        </Link>
+        {isUser && renderNavLink("/documents", "Documents")}
 
-        <Link
-          to="/profile"
-          className={navLinkClassName()}
-          aria-disabled={navigationLocked}
-          tabIndex={navigationLocked ? -1 : undefined}
-          onClick={handleNavigationClick}
-        >
-          Profil
-        </Link>
-
-        <Link
-          to="/progression"
-          className={navLinkClassName()}
-          aria-disabled={navigationLocked}
-          tabIndex={navigationLocked ? -1 : undefined}
-          onClick={handleNavigationClick}
-        >
-          Progression
-        </Link>
-
-        {isUser && (
-          <Link
-            to="/documents"
-            className={navLinkClassName()}
-            aria-disabled={navigationLocked}
-            tabIndex={navigationLocked ? -1 : undefined}
-            onClick={handleNavigationClick}
-          >
-            Documents
-          </Link>
-        )}
+        {renderNavLink("/progression", "Progression")}
+        {renderNavLink("/about", "À propos")}
 
         <button onClick={handleLogout}>
           Déconnexion

@@ -1,0 +1,367 @@
+
+.about-page {
+  --about-bg: #f8fafc;
+  --about-card: #ffffff;
+  --about-text: #111827;
+  --about-muted: #64748b;
+  --about-border: #e2e8f0;
+  --about-accent: #2563eb;
+
+  box-sizing: border-box;
+  min-height: calc(100vh - 70px);
+  padding: 48px 24px 24px;
+  color: var(--about-text);
+  background: var(--about-bg);
+}
+
+.about-page * {
+  box-sizing: border-box;
+}
+
+.about-hero,
+.about-section,
+.about-credits,
+.about-footer {
+  width: min(100%, 1080px);
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.about-hero {
+  padding: 44px 24px 52px;
+  text-align: center;
+  border-bottom: 1px solid var(--about-border);
+}
+
+.about-eyebrow {
+  display: inline-block;
+  color: var(--about-accent);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  line-height: 1.7;
+}
+
+.about-hero h1 {
+  margin: 18px 0 16px;
+  font-size: clamp(32px, 5vw, 52px);
+  font-weight: 800;
+  letter-spacing: -1.5px;
+  line-height: 1.12;
+}
+
+.about-intro {
+  max-width: 680px;
+  margin: 0 auto;
+  color: var(--about-muted);
+  font-size: 17px;
+  line-height: 1.8;
+}
+
+.about-github-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 28px;
+  padding: 13px 20px;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  background: #111827;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+  transition:
+    transform 0.2s ease,
+    background 0.2s ease;
+}
+
+.about-github-button:hover {
+  transform: translateY(-2px);
+  background: #273449;
+}
+
+.about-github-icon {
+  width: 21px;
+  height: 21px;
+  flex-shrink: 0;
+}
+
+.about-section {
+  padding: 46px 0;
+  border-bottom: 1px solid var(--about-border);
+}
+
+.about-section-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  margin-bottom: 28px;
+}
+
+.about-section-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
+  color: var(--about-accent);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.about-section-heading h2,
+.about-credits h2 {
+  margin: 0 0 9px;
+  font-size: clamp(23px, 3vw, 30px);
+  font-weight: 800;
+  letter-spacing: -0.5px;
+}
+
+.about-section-heading p {
+  max-width: 690px;
+  margin: 0;
+  color: var(--about-muted);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.about-features {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.about-feature {
+  padding: 24px;
+  border: 1px solid var(--about-border);
+  border-radius: 16px;
+  background: var(--about-card);
+  box-shadow: 0 4px 16px rgb(15 23 42 / 3%);
+}
+
+.about-feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 18px;
+  border-radius: 12px;
+  background: #eff6ff;
+  color: var(--about-accent);
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.about-feature h3 {
+  margin: 0 0 10px;
+  font-size: 17px;
+  font-weight: 750;
+}
+
+.about-feature p {
+  margin: 0;
+  color: var(--about-muted);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.about-partners {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+}
+
+.about-partner {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  padding: 28px 24px;
+  border: 1px solid var(--about-border);
+  border-radius: 16px;
+  background: var(--about-card);
+  text-align: center;
+}
+
+.about-partner-image {
+  display: flex;
+  width: 100%;
+  height: 140px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.about-partner-image img {
+  display: block;
+  max-width: 85%;
+  max-height: 115px;
+  object-fit: contain;
+}
+
+.about-logo-placeholder {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: var(--about-muted);
+  font-size: 12px;
+}
+
+.about-logo-placeholder strong {
+  color: #334155;
+  font-size: 15px;
+}
+
+.about-placeholder-icon {
+  color: var(--about-accent);
+  font-size: 26px;
+  line-height: 1;
+}
+
+.about-partner h3 {
+  margin: 22px 0 8px;
+  font-size: 19px;
+  font-weight: 800;
+}
+
+.about-partner > p {
+  max-width: 360px;
+  margin: 0;
+  color: var(--about-muted);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.about-credits {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  margin-top: 42px;
+  padding: 32px;
+  border: 1px solid var(--about-border);
+  border-radius: 18px;
+  background: var(--about-card);
+  box-shadow: 0 4px 16px rgb(15 23 42 / 3%);
+}
+
+.about-credits-content {
+  min-width: 0;
+}
+
+.about-credits h2 {
+  margin-top: 10px;
+}
+
+.about-credits-content > p {
+  margin: 13px 0;
+  color: var(--about-muted);
+  font-size: 14px;
+  line-height: 1.9;
+}
+
+.about-credits-content > p strong {
+  color: var(--about-text);
+}
+
+.about-credits-content .about-thanks {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--about-border);
+}
+
+.about-source-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--about-accent);
+  font-size: 14px;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.about-source-link:hover {
+  text-decoration: underline;
+}
+
+.about-footer {
+  padding: 30px 12px 12px;
+  color: var(--about-muted);
+  font-size: 12px;
+  line-height: 1.8;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .about-page {
+    padding: 24px 16px 16px;
+  }
+
+  .about-hero {
+    padding: 32px 4px 38px;
+  }
+
+  .about-intro {
+    font-size: 15px;
+  }
+
+  .about-section {
+    padding: 34px 0;
+  }
+
+  .about-section-heading {
+    gap: 13px;
+  }
+
+  .about-features {
+    grid-template-columns: 1fr;
+  }
+
+  .about-partners {
+    grid-template-columns: 1fr;
+  }
+
+  .about-partner {
+    padding: 22px 18px;
+  }
+
+  .about-credits {
+    gap: 14px;
+    margin-top: 28px;
+    padding: 22px 16px;
+  }
+
+  .about-section-number {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+  }
+}
+
+@media (max-width: 420px) {
+  .about-credits {
+    flex-direction: column;
+  }
+
+  .about-hero h1 {
+    letter-spacing: -0.8px;
+  }
+
+  .about-github-button {
+    gap: 8px;
+    padding: 12px 14px;
+    font-size: 13px;
+  }
+}
