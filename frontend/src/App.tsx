@@ -1,5 +1,8 @@
+
 import {
   BrowserRouter,
+  Navigate,
+  Outlet,
   Routes,
   Route,
   useLocation,
@@ -17,98 +20,83 @@ import Quiz from "./pages/Quiz";
 
 import { QuizProvider } from "./contexts/QuizContext";
 
+function hasSavedSession(): boolean {
+  return Boolean(
+    localStorage.getItem("access_token") ||
+    localStorage.getItem("refresh_token")
+  );
+}
 
-function AppContent() {
+function RootRedirect() {
+  return (
+    <Navigate
+      to={hasSavedSession() ? "/chatbot" : "/login"}
+      replace
+    />
+  );
+}
 
-  const location =
-    useLocation();
+function RequireAuth() {
+  const location = useLocation();
 
+  if (!hasSavedSession()) {
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: location }}
+      />
+    );
+  }
 
-  const hideNavbar =
-    location.pathname === "/login" ||
-    location.pathname === "/register";
+  return <Outlet />;
+}
 
-
+function AuthenticatedLayout() {
   return (
     <>
-      {!hideNavbar && <Navbar />}
-
-
-      <Routes>
-
-        <Route
-          path="/"
-          element={<Chatbot />}
-        />
-
-
-        <Route
-          path="/login"
-          element={<Login />}
-        />
-
-
-        <Route
-          path="/register"
-          element={<Register />}
-        />
-
-
-        <Route
-          path="/profile"
-          element={<Profile />}
-        />
-
-
-        <Route
-          path="/chat"
-          element={<Chatbot />}
-        />
-
-
-        <Route
-          path="/chatbot"
-          element={<Chatbot />}
-        />
-
-
-        <Route
-          path="/documents"
-          element={<DocumentUpload />}
-        />
-
-
-        <Route
-          path="/progression"
-          element={<Progression />}
-        />
-
-
-        <Route
-          path="/quiz"
-          element={<Quiz />}
-        />
-
-      </Routes>
+      <Navbar />
+      <Outlet />
     </>
   );
 }
 
-
 function App() {
-
   return (
     <BrowserRouter>
-
       <QuizProvider>
+        <Routes>
+          {/* Pages accessibles sans connexion */}
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
 
-        <AppContent />
+          {/* Redirection de la page d'accueil */}
+          <Route path="/" element={<RootRedirect />} />
 
+          {/* Pages nécessitant une session */}
+          <Route element={<RequireAuth />}>
+            <Route element={<AuthenticatedLayout />}>
+              <Route path="/profile" element={<Profile />} />
+              <Route path="/chat" element={<Chatbot />} />
+              <Route path="/chatbot" element={<Chatbot />} />
+              <Route
+                path="/documents"
+                element={<DocumentUpload />}
+              />
+              <Route
+                path="/progression"
+                element={<Progression />}
+              />
+              <Route path="/quiz" element={<Quiz />} />
+            </Route>
+          </Route>
+
+          {/* Toute URL inconnue revient au point d'entrée */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
       </QuizProvider>
-
     </BrowserRouter>
   );
 }
-
 
 export default App;
