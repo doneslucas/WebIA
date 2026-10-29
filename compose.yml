@@ -68,6 +68,21 @@ services:
     networks:
       - backend_network
 
+  nginx:
+    image: nginx:alpine
+    container_name: webia-nginx
+    ports:
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - frontend_network
+      - backend_network
+
 networks:
   frontend_network:
     driver: bridge

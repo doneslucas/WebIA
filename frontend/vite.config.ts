@@ -3,4 +3,8 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    host: '0.0.0.0',
+    allowedHosts: ['cyberia-stg.ser-techsupport.local'],
+  }
 })
