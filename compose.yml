@@ -6,9 +6,10 @@ services:
       args:
         HTTPS_PROXY: ${HTTPS_PROXY:-}
         NO_PROXY: ${NO_PROXY:-}
+        VITE_API_URL: /api
     container_name: webia_frontend
-    ports:
-      - "5173:5173"
+    expose:
+      - "80"
     depends_on:
       - backend
     networks:
