@@ -1,4 +1,3 @@
-
 from pathlib import Path
 import hashlib
 
@@ -15,6 +14,7 @@ from app.services.chroma import (
     add_chunks,
     delete_file,
     is_file_indexed,
+    get_file_chroma_ids,
 )
 
 from app.services.category_classifier import (
@@ -718,7 +718,6 @@ def index_pdf(
 
     initialize_progress(requested_filename)
 
-    # Le hash ne fait pas partie de la progression de classification.
     update_indexing_progress(
         filename=requested_filename,
         progress=0,
@@ -735,7 +734,6 @@ def index_pdf(
             f"{requested_filename} : {file_hash}"
         )
 
-        # La vérification ne modifie pas le pourcentage.
         update_indexing_progress(
             filename=requested_filename,
             progress=0,
@@ -747,6 +745,11 @@ def index_pdf(
         existing_document = get_existing_document(requested_filename)
         existing_document_by_hash = get_existing_document_by_hash(file_hash)
         content_changed = True
+        # Snapshot de l'état PostgreSQL au début de l'opération. Pour un nouveau
+        # document, si l'écriture Chroma réussit puis la transaction SQL échoue,
+        # on retire les IDs fraîchement écrits pour ne pas recréer un orphelin.
+        new_document_at_start = existing_document is None
+        orphan_index_recovery = False
 
         # ----------------------------------------------------
         # Le même contenu existe déjà sous un autre nom.
@@ -944,17 +947,21 @@ def index_pdf(
         # ----------------------------------------------------
 
         else:
-            chroma_indexed = is_file_indexed(requested_filename)
+            # On vérifie les IDs ChromaDB et les métadonnées source.
+            # Leur présence n'est plus un blocage définitif : une nouvelle
+            # indexation du PDF fourni peut reconstruire les chunks. La
+            # suppression réelle des anciens IDs reste limitée au fichier.
+            orphan_chroma_ids = get_file_chroma_ids(requested_filename)
 
-            if chroma_indexed:
+            if orphan_chroma_ids:
+                orphan_index_recovery = True
                 print(
-                    "[Indexer] Des données ChromaDB existent mais aucune ligne "
-                    "document ne correspond dans PostgreSQL."
+                    "[Indexer] Index ChromaDB orphelin détecté pour "
+                    f"{requested_filename} : {len(orphan_chroma_ids)} chunk(s)."
                 )
-
-                raise ValueError(
-                    f"Index ChromaDB orphelin pour {requested_filename}. "
-                    "La synchronisation doit être vérifiée avant de réindexer."
+                print(
+                    "[Indexer] Le document n'existe pas dans PostgreSQL. "
+                    "Le PDF fourni sera réindexé et l'index orphelin remplacé."
                 )
 
             content_changed = True
@@ -969,7 +976,6 @@ def index_pdf(
             task_manager.start_pdf_operation()
 
         try:
-            # La lecture du PDF ne modifie pas le pourcentage.
             update_indexing_progress(
                 filename=requested_filename,
                 progress=0,
@@ -980,7 +986,6 @@ def index_pdf(
 
             documents = load_pdf(file_path)
 
-            # Le découpage ne modifie pas le pourcentage.
             update_indexing_progress(
                 filename=requested_filename,
                 progress=0,
@@ -1000,10 +1005,7 @@ def index_pdf(
                     "Aucun chunk n'a été généré à partir du PDF."
                 )
 
-            texts = [
-                chunk.page_content
-                for chunk in chunks
-            ]
+            texts = [chunk.page_content for chunk in chunks]
 
             # =================================================
             # CLASSIFICATION DES CHUNKS
@@ -1011,7 +1013,6 @@ def index_pdf(
 
             total_chunks = len(chunks)
 
-            # La progression commence à 0 % au début de la classification.
             update_indexing_progress(
                 filename=requested_filename,
                 progress=0,
@@ -1049,10 +1050,6 @@ def index_pdf(
 
                 chunk_number = chunk_index + 1
 
-                # IMPORTANT :
-                # Pendant l'appel de classification, on conserve le dernier
-                # pourcentage calculé après le chunk précédent.
-                # Le pourcentage ne progresse donc pas pendant qu'Ollama travaille.
                 update_indexing_progress(
                     filename=requested_filename,
                     progress=None,
@@ -1114,13 +1111,7 @@ def index_pdf(
                         f"{chunk_number}/{total_chunks} → {category['name']}"
                     )
 
-                # Un chunk compte comme traité même si aucune catégorie
-                # valide n'a pu lui être attribuée.
-                # La progression est calculée uniquement à partir du nombre
-                # de chunks terminés, sans progression artificielle.
-                category_progress = int(
-                    chunk_number / total_chunks * 100
-                )
+                category_progress = int(chunk_number / total_chunks * 100)
 
                 update_indexing_progress(
                     filename=requested_filename,
@@ -1168,8 +1159,6 @@ def index_pdf(
             vectors = []
             total_texts = len(valid_texts)
 
-            # La classification est terminée : les étapes suivantes
-            # conservent le pourcentage atteint, sans le recalculer.
             update_indexing_progress(
                 filename=requested_filename,
                 progress=None,
@@ -1178,11 +1167,7 @@ def index_pdf(
                 details=f"Préparation des embeddings : 0/{total_texts}",
             )
 
-            for batch_start in range(
-                0,
-                total_texts,
-                EMBEDDING_BATCH_SIZE,
-            ):
+            for batch_start in range(0, total_texts, EMBEDDING_BATCH_SIZE):
                 task_manager.wait_for_pdf_permission()
 
                 batch_end = min(
@@ -1258,11 +1243,25 @@ def index_pdf(
 
             task_manager.wait_for_pdf_permission()
 
-            add_chunks(
-                chunks=valid_chunks,
-                vectors=vectors,
-                file_name=filename,
-            )
+            try:
+                add_chunks(
+                    chunks=valid_chunks,
+                    vectors=vectors,
+                    file_name=filename,
+                )
+            except Exception:
+                # Pour un document absent de PostgreSQL au début de l'opération,
+                # aucune ligne SQL existante n'est à préserver. Nettoyer les IDs
+                # de ce fichier évite de laisser un index partiel après l'échec.
+                if new_document_at_start:
+                    try:
+                        delete_file(requested_filename)
+                    except Exception as cleanup_error:
+                        print(
+                            "[Indexer] Échec du nettoyage après erreur ChromaDB "
+                            f"pour {filename} : {cleanup_error}"
+                        )
+                raise
 
             print(f"[Indexer] Indexation ChromaDB terminée : {filename}")
 
@@ -1280,10 +1279,14 @@ def index_pdf(
 
             task_manager.wait_for_pdf_permission()
 
-            connection = get_connection()
+            # Ouvrir la connexion à l'intérieur du try est important : si
+            # PostgreSQL est momentanément indisponible après l'écriture ChromaDB,
+            # le bloc except doit tout de même nettoyer l'index d'un nouveau PDF.
+            connection = None
             duplicate_file_deleted = False
 
             try:
+                connection = get_connection()
                 with connection.cursor() as cursor:
                     cursor.execute(
                         """
@@ -1453,11 +1456,37 @@ def index_pdf(
                     connection.commit()
 
             except Exception:
-                connection.rollback()
+                if connection is not None:
+                    try:
+                        connection.rollback()
+                    except Exception as rollback_error:
+                        print(
+                            "[Indexer] Échec du rollback PostgreSQL pour "
+                            f"{requested_filename} : {rollback_error}"
+                        )
+
+                # Aucun document PostgreSQL n'existait au début de cette opération.
+                # Même si l'ouverture de la connexion elle-même échoue après la
+                # création Chroma, on retire uniquement les IDs de ce PDF pour
+                # éviter de laisser un nouvel index orphelin.
+                if new_document_at_start:
+                    try:
+                        delete_file(requested_filename)
+                        print(
+                            "[Indexer] Index ChromaDB temporaire retiré après "
+                            f"échec PostgreSQL pour {requested_filename}. Le PDF reste "
+                            "disponible pour une nouvelle tentative."
+                        )
+                    except Exception as cleanup_error:
+                        print(
+                            "[Indexer] Échec du nettoyage ChromaDB après erreur "
+                            f"PostgreSQL pour {requested_filename} : {cleanup_error}"
+                        )
                 raise
 
             finally:
-                connection.close()
+                if connection is not None:
+                    connection.close()
 
             if (
                 requested_filename != filename
@@ -1469,8 +1498,6 @@ def index_pdf(
                     canonical_filename=filename,
                 )
 
-            # La classification a déjà atteint 100 %.
-            # La fin de l'indexation ne recalcule pas ce pourcentage.
             update_indexing_progress(
                 filename=requested_filename,
                 progress=None,
