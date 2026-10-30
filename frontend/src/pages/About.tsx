@@ -43,6 +43,11 @@ function PartnerLogo({
 function About() {
   useEffect(() => {
     document.title = "À propos de CyberIA";
+
+    // Réinitialise le titre lorsque l'utilisateur quitte la page.
+    return () => {
+      document.title = "CyberIA";
+    };
   }, []);
 
   return (

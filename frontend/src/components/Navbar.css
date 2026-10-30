@@ -1,3 +1,4 @@
+
 .navbar {
   width: 100%;
   min-height: 70px;
@@ -34,12 +35,13 @@
   color: white;
 }
 
+/* Liens désactivés pendant un quiz */
 .navbar-links a.navbar-link-disabled,
 .navbar-logo a.navbar-link-disabled {
   color: #6b7280;
-  opacity: 0.55;
+  opacity: 0.45;
   cursor: not-allowed;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .navbar-links button {

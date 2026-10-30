@@ -3,34 +3,21 @@ import { useEffect, useState, type MouseEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { getProfile } from "../services/api";
+import { useQuiz } from "../contexts/QuizContext";
 
 import "./Navbar.css";
 
 function Navbar() {
   const navigate = useNavigate();
+
   const [isUser, setIsUser] = useState(false);
-  const [quizInProgress, setQuizInProgress] = useState(
-    () => localStorage.getItem("webia_quiz_active") === "true",
-  );
 
-  useEffect(() => {
-    function updateQuizState() {
-      setQuizInProgress(
-        localStorage.getItem("webia_quiz_active") === "true",
-      );
-    }
+  // Lecture directe de l'état réel du quiz.
+  const { quizStarted, finished, returnToQuizHome } = useQuiz();
 
-    window.addEventListener("webia-quiz-state-change", updateQuizState);
-    window.addEventListener("storage", updateQuizState);
+  const quizInProgress = quizStarted && !finished;
 
-    updateQuizState();
-
-    return () => {
-      window.removeEventListener("webia-quiz-state-change", updateQuizState);
-      window.removeEventListener("storage", updateQuizState);
-    };
-  }, []);
-
+  // Récupération du rôle de l'utilisateur.
   useEffect(() => {
     let cancelled = false;
 
@@ -46,6 +33,7 @@ function Navbar() {
         }
 
         const profile = result.data;
+
         const role = String(
           profile?.role ??
           profile?.user?.role ??
@@ -74,69 +62,95 @@ function Navbar() {
     };
   }, []);
 
-  const navigationLocked = isUser && quizInProgress;
+  // Seuls Chatbot et Documents sont bloqués pendant un quiz.
+  function isNavigationLocked(to: string) {
+    return (
+      quizInProgress &&
+      (to === "/chatbot" || to === "/documents")
+    );
+  }
 
   function handleNavigationClick(
     event: MouseEvent<HTMLAnchorElement>,
+    locked: boolean,
   ) {
-    if (navigationLocked) {
+    if (locked) {
       event.preventDefault();
+      event.stopPropagation();
     }
   }
 
-  function handleLogout() {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
-    localStorage.removeItem("webia_quiz_active");
-    localStorage.removeItem("webia_chatbot_messages");
-    navigate("/login");
-  }
-
-  function navLinkClassName() {
-    return navigationLocked ? "navbar-link-disabled" : undefined;
-  }
-
   function renderNavLink(to: string, label: string) {
+    const locked = isNavigationLocked(to);
+
     return (
       <Link
         to={to}
-        className={navLinkClassName()}
-        aria-disabled={navigationLocked}
-        tabIndex={navigationLocked ? -1 : undefined}
-        onClick={handleNavigationClick}
+        className={locked ? "navbar-link-disabled" : undefined}
+        aria-disabled={locked}
+        tabIndex={locked ? -1 : undefined}
+        onClick={(event) =>
+          handleNavigationClick(event, locked)
+        }
       >
         {label}
       </Link>
     );
   }
 
+  function handleLogout() {
+    // Réinitialise également l'état réel du quiz.
+    returnToQuizHome();
+
+    localStorage.removeItem("access_token");
+    localStorage.removeItem("refresh_token");
+    localStorage.removeItem("webia_quiz_active");
+    localStorage.removeItem("webia_chatbot_messages");
+
+    navigate("/login");
+  }
+
+  const chatbotLocked = isNavigationLocked("/chatbot");
+
   return (
     <nav className="navbar">
+
       <div className="navbar-logo">
+
         <Link
           to="/chatbot"
-          className={navLinkClassName()}
-          aria-disabled={navigationLocked}
-          tabIndex={navigationLocked ? -1 : undefined}
-          onClick={handleNavigationClick}
+          className={
+            chatbotLocked ? "navbar-link-disabled" : undefined
+          }
+          aria-disabled={chatbotLocked}
+          tabIndex={chatbotLocked ? -1 : undefined}
+          onClick={(event) =>
+            handleNavigationClick(event, chatbotLocked)
+          }
         >
           🛡️ CyberIA
         </Link>
+
       </div>
 
       <div className="navbar-links">
+
         {renderNavLink("/chatbot", "Chatbot")}
+
         {renderNavLink("/quiz", "Quiz")}
+
         {renderNavLink("/profile", "Profil")}
 
         {isUser && renderNavLink("/documents", "Documents")}
 
         {renderNavLink("/progression", "Progression")}
+
         {renderNavLink("/about", "À propos")}
 
         <button onClick={handleLogout}>
           Déconnexion
         </button>
+
       </div>
     </nav>
   );

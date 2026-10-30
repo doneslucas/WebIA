@@ -1,3 +1,4 @@
+
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -106,7 +107,6 @@ function Progression() {
               Suivez votre évolution et vos résultats.
             </p>
           </div>
-
 
           <div className="progression-empty">
 
@@ -222,6 +222,35 @@ function Progression() {
       };
     }
   );
+
+
+  // Limite le nombre de dates affichées sur le graphique.
+  // Tous les points restent visibles, seules les dates
+  // intermédiaires sont masquées lorsque nécessaire.
+
+  const maxDateLabels = 7;
+
+  const dateLabelIndexes = new Set<number>();
+
+  if (chronologicalResults.length <= maxDateLabels) {
+
+    chronologicalResults.forEach((_, index) => {
+      dateLabelIndexes.add(index);
+    });
+
+  } else {
+
+    for (let i = 0; i < maxDateLabels; i++) {
+
+      const index = Math.round(
+        i *
+        (chronologicalResults.length - 1) /
+        (maxDateLabels - 1)
+      );
+
+      dateLabelIndexes.add(index);
+    }
+  }
 
 
   const linePoints = points
@@ -473,7 +502,7 @@ function Progression() {
 
               {points.map(
                 (point, index) => (
-                  <g key={index}>
+                  <g key={chronologicalResults[index].id}>
 
                     <circle
                       cx={point.x}
@@ -487,6 +516,10 @@ function Progression() {
                       {Math.round(
                         point.percentage
                       )}%
+                      {" - "}
+                      {formatDate(
+                        chronologicalResults[index].created_at
+                      )}
                     </title>
 
                   </g>
@@ -494,10 +527,14 @@ function Progression() {
               )}
 
 
-              {/* Dates */}
+              {/* Dates : affichage limité à 7 repères */}
 
               {chronologicalResults.map(
                 (result, index) => {
+
+                  if (!dateLabelIndexes.has(index)) {
+                    return null;
+                  }
 
                   const point =
                     points[index];
@@ -506,10 +543,7 @@ function Progression() {
                     <text
                       key={result.id}
                       x={point.x}
-                      y={
-                        chartHeight -
-                        15
-                      }
+                      y={chartHeight - 15}
                       className="chart-date"
                       textAnchor="middle"
                     >
